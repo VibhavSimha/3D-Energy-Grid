@@ -34,7 +34,7 @@ const viewer = new Cesium.Viewer('cesiumContainer', {
   sceneModePicker: true,
   navigationHelpButton: false,
   selectionIndicator: true,
-  infoBox: true,
+  infoBox: false,
   fullscreenButton: true,
   vrButton: false,
   shouldAnimate: true    // Start animation by default
@@ -72,7 +72,7 @@ const plantColors = {
 
 // Paths to the 3D models (GLB format required for Cesium)
 const plantModels = {
-  hydro: 'models/energy-plants/gravity-dam/USACE-3D-22-002-dam_converted.glb', 
+  hydro: 'models/energy-plants/gravity-dam/USACE-3D-22-002-dam_converted.glb',
   nuclear: 'models/energy-plants/nuclear-power-plant/ImageToStl.com_aes/aes_converted.glb',
   solar: 'models/energy-plants/Solar_Panels_V1_L3.123cc8f890de-f0dc-4416-91ba-2d06cafb9a74/Solar_Panels_V1_L3.123cc8f890de-f0dc-4416-91ba-2d06cafb9a74/10781_Solar-Panels_V1_converted.glb',
   wind: 'models/energy-plants/38-eolic-obj/EolicOBJ_converted.glb'
@@ -94,7 +94,17 @@ let selectedPlantName = null; // Track currently selected plant
 
 // Add plant entities to the viewer
 bengaluruPlants.forEach(plant => {
-  const position = Cesium.Cartesian3.fromDegrees(plant.lon, plant.lat);
+  // Fix for levitating solar panels:
+  // If it's a solar plant, we might need to lower it slightly or clamp it differently.
+  // Using RELATIVE_TO_GROUND allows us to set a height (altitude).
+  // A negative height will bury it, a positive will lift it.
+  // Adjust 'heightOffset' as needed for your specific model.
+  let heightOffset = 0;
+  if (plant.type === 'solar') {
+    heightOffset = -2500; // Drastically increased offset to fix levitation
+  }
+
+  const position = Cesium.Cartesian3.fromDegrees(plant.lon, plant.lat, heightOffset);
   const color = plantColors[plant.type] || Cesium.Color.WHITE;
 
   viewer.entities.add({
@@ -108,15 +118,15 @@ bengaluruPlants.forEach(plant => {
     model: {
       uri: plantModels[plant.type],
       // TO CHANGE SIZE: Adjust the 'scale' value below.
-      scale: 20.0, 
-      
+      scale: 20.0,
+
       // --- COMMENT OUT THESE 3 LINES TO RESTORE ORIGINAL COLORS ---
       // color: color, // Tint the model with the plant type color
       // colorBlendMode: Cesium.ColorBlendMode.HIGHLIGHT,
       // colorBlendAmount: 0.5,
       // ------------------------------------------------------------
 
-      heightReference: Cesium.HeightReference.CLAMP_TO_GROUND
+      heightReference: Cesium.HeightReference.RELATIVE_TO_GROUND
     }
   });
 });
@@ -129,7 +139,7 @@ function drawPowerLines() {
   // Create a sequence of positions connecting the plants
   // We'll connect them in the order they appear in the list, and close the loop
   const positions = bengaluruPlants.map(plant => Cesium.Cartesian3.fromDegrees(plant.lon, plant.lat));
-  
+
   // Close the loop by adding the first point at the end
   if (positions.length > 0) {
     positions.push(positions[0]);
@@ -198,7 +208,7 @@ function buildPlantListUI() {
 
     const categoryDiv = document.createElement('div');
     categoryDiv.className = 'plant-category';
-    
+
     const categoryTitle = document.createElement('div');
     categoryTitle.className = 'category-title';
     categoryTitle.textContent = `${category.charAt(0).toUpperCase() + category.slice(1)} Power`;
@@ -207,7 +217,7 @@ function buildPlantListUI() {
     categories[category].forEach(plant => {
       const item = document.createElement('div');
       item.className = 'plant-item';
-      
+
       const nameDiv = document.createElement('div');
       nameDiv.className = 'plant-name';
       nameDiv.textContent = plant.name;
@@ -215,12 +225,12 @@ function buildPlantListUI() {
 
       const infoDiv = document.createElement('div');
       infoDiv.className = 'plant-info';
-      
+
       const capacitySpan = document.createElement('span');
       capacitySpan.className = 'plant-capacity';
       capacitySpan.textContent = plant.capacity;
       infoDiv.appendChild(capacitySpan);
-      
+
       item.appendChild(infoDiv);
 
       item.onclick = () => {
@@ -267,7 +277,7 @@ viewer.selectedEntityChanged.addEventListener((entity) => {
 function makeElementDraggable(elementId, handleId) {
   const element = document.getElementById(elementId);
   const handle = document.querySelector(handleId);
-  
+
   if (!element || !handle) return;
 
   let isDragging = false;
@@ -276,25 +286,34 @@ function makeElementDraggable(elementId, handleId) {
   handle.style.cursor = 'grab';
 
   handle.addEventListener('mousedown', (e) => {
+    // Allow interaction with buttons inside the handle
+    if (e.target.tagName === 'BUTTON' || e.target.closest('button')) {
+      return;
+    }
+
     isDragging = true;
     startX = e.clientX;
     startY = e.clientY;
-    
+
     // Get current position (computed style handles both 'left/top' and 'transform' if needed, 
     // but here we are using absolute positioning with right/top initially. 
     // We need to switch to left/top for dragging to work smoothly from any position)
     const rect = element.getBoundingClientRect();
     initialLeft = rect.left;
     initialTop = rect.top;
-    
+
     // Switch from 'right' positioning to 'left' to allow free movement
     element.style.right = 'auto';
     element.style.left = `${initialLeft}px`;
     element.style.top = `${initialTop}px`;
     element.style.bottom = 'auto';
-    
+
+    // IMPORTANT: Remove the transform (translate -50%, -50%) because we are now positioning absolutely
+    // based on the calculated rect. If we don't remove this, it will jump up/left.
+    element.style.transform = 'none';
+
     handle.style.cursor = 'grabbing';
-    
+
     // Prevent text selection during drag
     e.preventDefault();
   });
@@ -343,23 +362,28 @@ function updatePlantDetailPanel(plantName) {
 
   document.getElementById('detailName').textContent = plantName;
   document.getElementById('detailType').textContent = data.type.toUpperCase();
-  
+
   const statusElem = document.getElementById('detailStatus');
   statusElem.textContent = data.status;
   statusElem.style.color = data.status === 'ONLINE' ? '#4caf50' : '#ffb74d';
   statusElem.style.background = data.status === 'ONLINE' ? 'rgba(76, 175, 80, 0.2)' : 'rgba(255, 183, 77, 0.2)';
 
   document.getElementById('detailOutput').textContent = data.output.toFixed(1);
-  
+
   const pct = Math.min(100, (data.output / data.maxCapacity) * 100);
   document.getElementById('detailOutputBar').style.width = `${pct}%`;
-  
+
   document.getElementById('detailEfficiency').textContent = `${data.efficiency.toFixed(1)}%`;
   document.getElementById('detailTemp').textContent = `${data.temperature.toFixed(1)}°C`;
 }
 
 // Close button handler
-document.getElementById('closeDetail').addEventListener('click', hidePlantDetail);
+const closeBtn = document.getElementById('closeDetail');
+closeBtn.addEventListener('click', hidePlantDetail);
+// Prevent drag start when clicking close button
+closeBtn.addEventListener('mousedown', (e) => {
+  e.stopPropagation();
+});
 
 // --- Real-time Simulation Logic ---
 
@@ -397,7 +421,7 @@ viewer.clock.onTick.addEventListener((clock) => {
         const sunIntensity = Math.max(0, Math.sin(((hour - 6) / 12) * Math.PI));
         currentOutput = maxCap * sunIntensity;
         // Cloud cover simulation (Perlin-like noise)
-        const cloudCover = Math.sin(hour * 5) * 0.1 + 0.9; 
+        const cloudCover = Math.sin(hour * 5) * 0.1 + 0.9;
         currentOutput *= cloudCover;
       }
       emissionFactor = 0;
@@ -410,11 +434,11 @@ viewer.clock.onTick.addEventListener((clock) => {
     } else if (plant.type === 'hydro') {
       // Hydro: Dispatchable - ramps up to meet demand peaks
       const demandFactor = (gridState.totalDemand - 600) / 500; // Normalized peak demand
-      currentOutput = maxCap * (0.4 + Math.max(0, demandFactor * 0.6)); 
+      currentOutput = maxCap * (0.4 + Math.max(0, demandFactor * 0.6));
       emissionFactor = 0;
     } else if (plant.type === 'nuclear') {
       // Nuclear: Base load, very stable
-      currentOutput = maxCap * 0.98; 
+      currentOutput = maxCap * 0.98;
       emissionFactor = 12; // Very low but non-zero lifecycle
     }
 
@@ -437,10 +461,10 @@ viewer.clock.onTick.addEventListener((clock) => {
   });
 
   // 3. Grid Physics & Economics
-  
+
   // Import/Export Logic: If Demand > Gen, we import dirty power. If Gen > Demand, we export.
   const netLoad = gridState.totalDemand - currentTotalGen;
-  
+
   if (netLoad > 0) {
     // Importing power (usually fossil fuel heavy peaker plants)
     currentTotalGen += netLoad; // Grid balances by importing
@@ -450,7 +474,7 @@ viewer.clock.onTick.addEventListener((clock) => {
   // Frequency Simulation with Inertia
   const balance = (currentTotalGen - gridState.totalDemand); // Should be 0 if balanced perfectly
   // Add some "error" to simulation to make frequency wobble
-  const controlError = (Math.random() - 0.5) * 5; 
+  const controlError = (Math.random() - 0.5) * 5;
   const targetFreq = 50.0 + (controlError / 1000);
   // Smooth transition (Inertia)
   gridState.frequency = gridState.frequency * 0.95 + targetFreq * 0.05;
@@ -460,11 +484,11 @@ viewer.clock.onTick.addEventListener((clock) => {
   const scarcityFactor = Math.max(0, (gridState.totalDemand / 1200)); // 0 to 1+
   const basePrice = 40; // $/MWh
   gridState.marketPrice = basePrice + (scarcityFactor * scarcityFactor * 100);
-  
+
   // Revenue Accumulation (Time step is roughly 1/60th of an hour in real time, but simulation is 3600x speed)
   // 1 real sec = 1 sim hour. 60fps. 
   // So each tick is 1/60th of a real second = 1/60th of a sim hour = 1 sim minute.
-  const hoursPerTick = 1 / 60; 
+  const hoursPerTick = 1 / 60;
   const revenueTick = (gridState.totalDemand * gridState.marketPrice) * hoursPerTick;
   gridState.totalRevenue += revenueTick;
 
@@ -475,7 +499,7 @@ viewer.clock.onTick.addEventListener((clock) => {
 
   // 4. Update Dashboard UI
   // updateDashboard(hour);
-  
+
   // 5. Update Plant Detail Panel if open
   if (selectedPlantName) {
     updatePlantDetailPanel(selectedPlantName);
@@ -493,7 +517,7 @@ function updateDashboard(hour) {
   document.getElementById('totalGen').textContent = gridState.totalGen.toLocaleString();
   document.getElementById('renewablePct').textContent = `${gridState.renewablePct}%`;
   document.getElementById('gridFreq').textContent = `${gridState.frequency.toFixed(3)} Hz`;
-  
+
   // New Values
   document.getElementById('marketPrice').textContent = `$${gridState.marketPrice.toFixed(2)}`;
   document.getElementById('carbonIntensity').textContent = `${gridState.carbonIntensity}g`;
