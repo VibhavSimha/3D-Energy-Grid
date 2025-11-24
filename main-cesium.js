@@ -7,25 +7,17 @@ import 'cesium/Build/Cesium/Widgets/widgets.css';
 // 3. Copy the "Default" token and paste it below.
 Cesium.Ion.defaultAccessToken = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJqdGkiOiI1ZjE0YmM0MS03MDdkLTQyZmMtODFiMC00YjljZDcyMzdhYTEiLCJpZCI6MzYxNzI0LCJpYXQiOjE3NjM1Mzg0NTF9.gndeuPVI38HHOj7CgWhS5lCij_BwzL6SmSPkubXvP_4';
 
-// Power plant locations in Bengaluru area
+// Power plant locations in Karnataka area
 // TO CHANGE POSITIONS: Update the 'lat' (latitude) and 'lon' (longitude) values below.
 const bengaluruPlants = [
-  // Hydro plants
-  { name: 'Hesaraghatta Hydro', type: 'hydro', capacity: '45 MW', lat: 13.1328, lon: 77.4714 },
-  { name: 'Thippagondanahalli Hydro', type: 'hydro', capacity: '38 MW', lat: 12.8675, lon: 77.3589 },
-  
-  // Nuclear plant
-  { name: 'Bengaluru Nuclear Facility', type: 'nuclear', capacity: '500 MW', lat: 12.7342, lon: 77.3456 },
-  
-  // Solar plants
-  { name: 'Electronic City Solar Park', type: 'solar', capacity: '150 MW', lat: 12.8456, lon: 77.6789 },
-  { name: 'Whitefield Solar Farm', type: 'solar', capacity: '120 MW', lat: 12.9698, lon: 77.7499 },
-  { name: 'Yelahanka Solar Plant', type: 'solar', capacity: '95 MW', lat: 13.1007, lon: 77.5963 },
-  
-  // Wind farms
-  { name: 'Nandi Hills Wind Farm', type: 'wind', capacity: '200 MW', lat: 13.3704, lon: 77.6839 },
-  { name: 'Devanahalli Wind Park', type: 'wind', capacity: '180 MW', lat: 13.2474, lon: 77.7081 },
-  { name: 'Kolar Wind Facility', type: 'wind', capacity: '160 MW', lat: 13.1392, lon: 78.1299 }
+  { name: 'Tuppadahalli Wind Power Station', type: 'wind', capacity: '56 MW', lat: 13.94903334908406, lon: 76.0486864696537 },
+  { name: 'Kaiga Nuclear Power Plant', type: 'nuclear', capacity: '880 MW', lat: 14.865460, lon: 74.439071 },
+  { name: 'Pavagada Solar Park', type: 'solar', capacity: '2050 MW', lat: 14.139977, lon: 77.314803 },
+  { name: 'Shivanasamudra Hydro Plant', type: 'hydro', capacity: '42 MW', lat: 12.298628, lon: 77.170727 },
+  { name: 'Mahatma Gandhi Hydro Plant', type: 'hydro', capacity: '139 MW', lat: 14.227473, lon: 74.799363 },
+  { name: 'Almatti Dam', type: 'hydro', capacity: '290 MW', lat: 16.331017, lon: 75.887133 },
+  { name: 'Jindal Jogihalli Wind Plant', type: 'wind', capacity: '20 MW', lat: 14.671766, lon: 76.421704 },
+  { name: 'Raichur Solar Park', type: 'solar', capacity: '100 MW', lat: 16.134622, lon: 77.125315 }
 ];
 
 // Initialize Cesium Viewer with 3D terrain (Requires valid Token)
