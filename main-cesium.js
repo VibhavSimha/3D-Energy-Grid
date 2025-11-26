@@ -136,11 +136,14 @@ async function loadRealWorldGrid() {
 
     console.log(`Loading ${features.length} grid elements...`);
 
+    // Clear existing segments
+    powerSegments.length = 0;
+
     const CHUNK_SIZE = 2000;
     const points = new Cesium.PointPrimitiveCollection();
-    viewer.scene.primitives.add(points); // Add collection once, populate incrementally
+    viewer.scene.primitives.add(points);
 
-    // Process in chunks to prevent UI freeze / Crash
+    // Process in chunks
     for (let i = 0; i < features.length; i += CHUNK_SIZE) {
       const chunk = features.slice(i, i + CHUNK_SIZE);
       const lineInstances = [];
@@ -151,6 +154,8 @@ async function loadRealWorldGrid() {
 
         if (geometry.type === 'LineString') {
           const positions = Cesium.Cartesian3.fromDegreesArray(geometry.coordinates.flat());
+
+          // Add to Visuals
           lineInstances.push(new Cesium.GeometryInstance({
             geometry: new Cesium.GroundPolylineGeometry({
               positions: positions,
@@ -160,9 +165,21 @@ async function loadRealWorldGrid() {
               color: Cesium.ColorGeometryInstanceAttribute.fromColor(Cesium.Color.GOLD.withAlpha(0.5))
             }
           }));
+
+          // Add to Animation Segments
+          for (let k = 0; k < positions.length - 1; k++) {
+            powerSegments.push({
+              start: positions[k],
+              end: positions[k + 1],
+              length: Cesium.Cartesian3.distance(positions[k], positions[k + 1])
+            });
+          }
+
         } else if (geometry.type === 'MultiLineString') {
           for (const coords of geometry.coordinates) {
             const positions = Cesium.Cartesian3.fromDegreesArray(coords.flat());
+
+            // Add to Visuals
             lineInstances.push(new Cesium.GeometryInstance({
               geometry: new Cesium.GroundPolylineGeometry({
                 positions: positions,
@@ -172,6 +189,15 @@ async function loadRealWorldGrid() {
                 color: Cesium.ColorGeometryInstanceAttribute.fromColor(Cesium.Color.GOLD.withAlpha(0.5))
               }
             }));
+
+            // Add to Animation Segments
+            for (let k = 0; k < positions.length - 1; k++) {
+              powerSegments.push({
+                start: positions[k],
+                end: positions[k + 1],
+                length: Cesium.Cartesian3.distance(positions[k], positions[k + 1])
+              });
+            }
           }
         } else if (geometry.type === 'Point') {
           points.add({
@@ -191,7 +217,7 @@ async function loadRealWorldGrid() {
         }));
       }
 
-      // Yield to main thread to prevent crash/freeze
+      // Yield to main thread
       if (i + CHUNK_SIZE < features.length) {
         await new Promise(resolve => setTimeout(resolve, 0));
       }
@@ -199,7 +225,8 @@ async function loadRealWorldGrid() {
       console.log(`Loaded chunk ${i / CHUNK_SIZE + 1} / ${Math.ceil(features.length / CHUNK_SIZE)}`);
     }
 
-    console.log("Full Grid Loaded Successfully");
+    console.log("Full Grid Loaded. Initializing Particles...");
+    initEnergyParticles();
 
   } catch (error) {
     console.error("Failed to load GeoJSON:", error);
@@ -212,6 +239,7 @@ loadRealWorldGrid();
 let powerGridEntities = []; // Store all line entities
 const powerSegments = []; // Store segments for particle flow
 
+// NOTE: drawPowerLines is now disabled/superseded by loadRealWorldGrid for animation
 function drawPowerLines() {
   // Clear existing lines if any (though we only call this once currently)
   powerGridEntities.forEach(e => viewer.entities.remove(e));
@@ -251,13 +279,11 @@ function drawPowerLines() {
       powerGridEntities.push(entity);
     }
   }
-
-  initEnergyParticles();
 }
 
 // --- Energy Flow Particles ---
 const particles = [];
-let MAX_PARTICLES = 0; // Will be set based on segments
+let MAX_PARTICLES = 0;
 const WATTS_PER_PARTICLE = 40; // 1 dot = 40 MW
 
 function initEnergyParticles() {
@@ -265,8 +291,15 @@ function initEnergyParticles() {
   particles.forEach(p => viewer.entities.remove(p.entity));
   particles.length = 0;
 
-  // Max 4 particles per line
-  MAX_PARTICLES = powerSegments.length * 4;
+  // CAP the particles for performance on real grid
+  // Real grid has thousands of segments. We don't want 4 * 50,000 particles.
+  // Let's cap at 3000 active particles max.
+  const HARD_CAP = 3000;
+
+  // We still use the pool size logic, but clamped.
+  MAX_PARTICLES = Math.min(powerSegments.length * 2, HARD_CAP);
+
+  console.log(`Initializing ${MAX_PARTICLES} particles for ${powerSegments.length} segments.`);
 
   for (let i = 0; i < MAX_PARTICLES; i++) {
     const particle = viewer.entities.add({
@@ -275,28 +308,26 @@ function initEnergyParticles() {
         return particles[i].currentPos;
       }, false),
       point: {
-        pixelSize: 9,
+        pixelSize: 7, // Slightly smaller for dense grid
         color: new Cesium.CallbackProperty(() => {
-          // Color based on grid stability
           if (gridState.frequency < 49.8 || gridState.frequency > 50.2) {
             return Cesium.Color.ORANGERED;
           }
           return Cesium.Color.WHITE;
         }, false),
         outlineColor: Cesium.Color.CYAN,
-        outlineWidth: 2
+        outlineWidth: 1
       }
     });
 
-    // Assign random start segment and progress
-    // To minimize clumping, we could distribute evenly, but random is usually okay with low density.
-    const segmentIdx = i % powerSegments.length; // Distribute evenly initially
+    // Assign random start segment
+    const segmentIdx = Math.floor(Math.random() * powerSegments.length);
 
     particles.push({
       entity: particle,
       segmentIdx: segmentIdx,
-      progress: Math.random(), // 0.0 to 1.0
-      speedOffset: 0.9 + Math.random() * 0.2 // Less variance
+      progress: Math.random(),
+      speedOffset: 0.8 + Math.random() * 0.4
     });
   }
 }
@@ -336,28 +367,26 @@ function updateEnergyParticles(dt) {
 
       if (p.progress >= 1.0) {
         p.progress = 0;
-        // Pick new segment. 
-        // To strictly enforce "max 4 per line", we'd need complex tracking.
-        // But since MAX_PARTICLES = Segments * 4, and we only show a subset,
-        // random assignment is statistically safe enough.
+        // Pick new random segment
         p.segmentIdx = Math.floor(Math.random() * powerSegments.length);
       }
 
       // Update Position
       const seg = powerSegments[p.segmentIdx];
-      p.currentPos = Cesium.Cartesian3.lerp(seg.start, seg.end, p.progress, new Cesium.Cartesian3());
+      // Safety check in case segments changed
+      if (seg) {
+        p.currentPos = Cesium.Cartesian3.lerp(seg.start, seg.end, p.progress, new Cesium.Cartesian3());
 
-      const cartographic = Cesium.Cartographic.fromCartesian(p.currentPos);
-      cartographic.height += 25;
-      p.currentPos = Cesium.Cartesian3.fromRadians(cartographic.longitude, cartographic.latitude, cartographic.height);
+        const cartographic = Cesium.Cartographic.fromCartesian(p.currentPos);
+        cartographic.height += 15; // Lower height for city lines
+        p.currentPos = Cesium.Cartesian3.fromRadians(cartographic.longitude, cartographic.latitude, cartographic.height);
+      }
 
     } else {
       p.entity.show = false;
     }
   }
 }
-
-drawPowerLines();
 
 // Fly the camera to Bengaluru
 viewer.camera.flyTo({
