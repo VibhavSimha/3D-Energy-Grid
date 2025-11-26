@@ -321,12 +321,12 @@
       font-family: 'Inter', sans-serif;
     }
 
-    /* Grid Monitor Dashboard */
-    #gridMonitor {
+    /* ML Control Panel */
+    #mlControlPanel {
       position: absolute;
       top: 100px;
       left: 24px;
-      width: 280px;
+      width: 300px;
       background: var(--glass-bg);
       backdrop-filter: blur(20px);
       -webkit-backdrop-filter: blur(20px);
@@ -338,38 +338,159 @@
       z-index: 10;
     }
 
-    .monitor-header {
+    .ml-header {
       display: flex;
       justify-content: space-between;
       align-items: center;
       margin-bottom: 16px;
+      cursor: grab;
     }
 
-    .monitor-header h3 {
+    .ml-header:active {
+      cursor: grabbing;
+    }
+
+    .ml-header h3 {
       margin: 0;
       font-size: 14px;
       font-weight: 600;
       color: var(--text-secondary);
       text-transform: uppercase;
       letter-spacing: 0.05em;
+      display: flex;
+      align-items: center;
+      gap: 8px;
     }
 
-    #clockDisplay {
-      font-family: 'Courier New', monospace;
-      font-weight: 700;
-      font-size: 16px;
-      color: var(--accent-color);
-      background: rgba(0, 0, 0, 0.3);
-      padding: 4px 8px;
+    .live-indicator {
+      width: 8px;
+      height: 8px;
+      background-color: #4caf50;
+      border-radius: 50%;
+      box-shadow: 0 0 8px #4caf50;
+      animation: pulse 2s infinite;
+      display: none;
+      /* Hidden when off */
+    }
+
+    .live-indicator.active {
+      display: block;
+    }
+
+    @keyframes pulse {
+      0% {
+        opacity: 1;
+        transform: scale(1);
+      }
+
+      50% {
+        opacity: 0.5;
+        transform: scale(1.2);
+      }
+
+      100% {
+        opacity: 1;
+        transform: scale(1);
+      }
+    }
+
+    .strategy-toggles {
+      display: flex;
+      background: rgba(255, 255, 255, 0.05);
+      padding: 4px;
+      border-radius: 8px;
+      margin-bottom: 20px;
+    }
+
+    .strategy-btn {
+      flex: 1;
+      background: none;
+      border: none;
+      color: var(--text-secondary);
+      padding: 8px;
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
       border-radius: 6px;
-      border: 1px solid var(--glass-border);
+      transition: all 0.2s ease;
     }
 
-    .monitor-row {
+    .strategy-btn:hover {
+      color: var(--text-primary);
+    }
+
+    .strategy-btn.active {
+      background: var(--accent-color);
+      color: white;
+      box-shadow: 0 2px 8px rgba(79, 138, 255, 0.3);
+    }
+
+    .ml-chart-container {
+      margin-top: 16px;
+    }
+
+    .chart-row {
+      margin-bottom: 12px;
+    }
+
+    .chart-label-row {
       display: flex;
       justify-content: space-between;
-      margin-bottom: 6px;
-      font-size: 13px;
+      font-size: 12px;
+      margin-bottom: 4px;
+      color: var(--text-secondary);
+    }
+
+    .chart-bar-bg {
+      height: 6px;
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 3px;
+      overflow: hidden;
+      position: relative;
+    }
+
+    .chart-bar-fill {
+      height: 100%;
+      background: var(--accent-color);
+      border-radius: 3px;
+      width: 0%;
+      transition: width 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    .chart-bar-target {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      width: 2px;
+      background: #fff;
+      z-index: 2;
+      opacity: 0.7;
+      display: none;
+      /* Show only when ML active */
+    }
+
+    .metric-gain {
+      margin-top: 16px;
+      padding-top: 16px;
+      border-top: 1px solid var(--glass-border);
+      text-align: center;
+    }
+
+    .gain-value {
+      font-size: 20px;
+      font-weight: 700;
+      color: #4caf50;
+    }
+
+    .gain-label {
+      font-size: 11px;
+      color: var(--text-secondary);
+    }
+
+    #chartContainer {
+      margin-top: 16px;
+      height: 120px;
+      width: 100%;
     }
 
     /* Plant Detail Panel */
@@ -610,6 +731,7 @@
       }
     }
   </style>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 
 <body>
@@ -636,56 +758,73 @@
     <div id="plantList"></div>
   </div>
 
-  <!-- Grid Monitor Dashboard -->
-  <!-- <div id="gridMonitor">
-      <div class="monitor-header">
-        <h3>Grid Status</h3>
-        <div id="clockDisplay">00:00</div>
-      </div>
-      
-      <div class="monitor-row">
-        <div class="monitor-label">Total Demand</div>
-        <div class="monitor-value"><span id="totalDemand">0</span> MW</div>
-      </div>
-      <div class="monitor-bar-bg"><div id="demandBar" class="monitor-bar-fill" style="width: 0%"></div></div>
+  <!-- ML Control Panel -->
+  <div id="mlControlPanel">
+    <div class="ml-header">
+      <h3>
+        <span class="live-indicator" id="mlLiveIndicator"></span>
+        ML Optimization
+      </h3>
+      <div id="clockDisplay">00:00</div>
+    </div>
 
-      <div class="monitor-row">
-        <div class="monitor-label">Total Generation</div>
-        <div class="monitor-value"><span id="totalGen">0</span> MW</div>
-      </div>
-      <div class="monitor-bar-bg"><div id="genBar" class="monitor-bar-fill" style="width: 0%"></div></div>
+    <div class="strategy-toggles">
+      <button class="strategy-btn active" onclick="setOptimizationMode('off')">Physics</button>
+      <button class="strategy-btn" onclick="setOptimizationMode('cost')">Cost Opt</button>
+      <button class="strategy-btn" onclick="setOptimizationMode('impact')">Eco Mode</button>
+    </div>
 
-      <div class="monitor-divider"></div>
-
-      <div class="monitor-stats">
-        <div class="stat-item">
-          <span class="stat-label">Renewable</span>
-          <span class="stat-value" id="renewablePct">0%</span>
+    <div class="ml-chart-container">
+      <div class="chart-row">
+        <div class="chart-label-row">
+          <span>Solar</span>
+          <span id="mlSolarVal">0 MW</span>
         </div>
-        <div class="stat-item">
-          <span class="stat-label">Frequency</span>
-          <span class="stat-value" id="gridFreq">50.0 Hz</span>
+        <div class="chart-bar-bg">
+          <div id="mlSolarBar" class="chart-bar-fill" style="width: 0%; background: #ffeb3b;"></div>
         </div>
       </div>
 
-      <div class="monitor-divider"></div>
+      <div class="chart-row">
+        <div class="chart-label-row">
+          <span>Wind</span>
+          <span id="mlWindVal">0 MW</span>
+        </div>
+        <div class="chart-bar-bg">
+          <div id="mlWindBar" class="chart-bar-fill" style="width: 0%; background: #00bcd4;"></div>
+        </div>
+      </div>
 
-      <div class="monitor-stats">
-        <div class="stat-item">
-          <span class="stat-label">Market Price</span>
-          <span class="stat-value" id="marketPrice">$0.00</span>
+      <div class="chart-row">
+        <div class="chart-label-row">
+          <span>Hydro</span>
+          <span id="mlHydroVal">0 MW</span>
         </div>
-        <div class="stat-item">
-          <span class="stat-label">Carbon</span>
-          <span class="stat-value" id="carbonIntensity">0g</span>
+        <div class="chart-bar-bg">
+          <div id="mlHydroBar" class="chart-bar-fill" style="width: 0%; background: #2196f3;"></div>
         </div>
       </div>
-      
-      <div class="monitor-row" style="margin-top: 12px;">
-        <div class="monitor-label">Est. Revenue</div>
-        <div class="monitor-value" style="color: var(--accent-color);">$<span id="totalRevenue">0</span></div>
+
+      <div class="chart-row">
+        <div class="chart-label-row">
+          <span>Nuclear</span>
+          <span id="mlNuclearVal">0 MW</span>
+        </div>
+        <div class="chart-bar-bg">
+          <div id="mlNuclearBar" class="chart-bar-fill" style="width: 0%; background: #ff9800;"></div>
+        </div>
       </div>
-    </div> -->
+    </div>
+
+    <div id="chartContainer">
+      <canvas id="mlChart"></canvas>
+    </div>
+
+    <div class="metric-gain">
+      <div class="gain-value" id="mlGainValue">--</div>
+      <div class="gain-label">Optimization Metric</div>
+    </div>
+  </div>
 
   <!-- Plant Detail Dashboard -->
   <div id="plantDetailPanel">

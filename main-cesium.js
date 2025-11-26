@@ -126,42 +126,152 @@ bengaluruPlants.forEach(plant => {
 });
 
 // Draw power lines (connections) between plants to simulate a grid
-let powerGridEntity;
-function drawPowerLines() {
-  // TO CHANGE POWER LINES: Modify how 'positions' are calculated here.
-  // Currently it connects plants in the order they appear in the list.
-  // Create a sequence of positions connecting the plants
-  // We'll connect them in the order they appear in the list, and close the loop
-  const positions = bengaluruPlants.map(plant => Cesium.Cartesian3.fromDegrees(plant.lon, plant.lat));
+let powerGridEntities = []; // Store all line entities
+const powerSegments = []; // Store segments for particle flow
 
-  // Close the loop by adding the first point at the end
-  if (positions.length > 0) {
-    positions.push(positions[0]);
+function drawPowerLines() {
+  // Clear existing lines if any (though we only call this once currently)
+  powerGridEntities.forEach(e => viewer.entities.remove(e));
+  powerGridEntities = [];
+
+  // Create a Full Mesh Network (Connect every plant to every other plant)
+  // We use a nested loop but avoid duplicates (A->B is same as B->A)
+  for (let i = 0; i < bengaluruPlants.length; i++) {
+    for (let j = i + 1; j < bengaluruPlants.length; j++) {
+      const p1 = bengaluruPlants[i];
+      const p2 = bengaluruPlants[j];
+
+      const start = Cesium.Cartesian3.fromDegrees(p1.lon, p1.lat);
+      const end = Cesium.Cartesian3.fromDegrees(p2.lon, p2.lat);
+
+      // Add to segments for particles
+      powerSegments.push({
+        start: start,
+        end: end,
+        length: Cesium.Cartesian3.distance(start, end)
+      });
+
+      // Create the visual line
+      const entity = viewer.entities.add({
+        name: `Grid Connection ${p1.name} - ${p2.name}`,
+        polyline: {
+          positions: [start, end],
+          width: 8, // Thicker wires as requested
+          material: new Cesium.PolylineGlowMaterialProperty({
+            glowPower: 0.25,
+            taperPower: 0.5,
+            color: Cesium.Color.CYAN.withAlpha(0.6),
+          }),
+          clampToGround: true
+        }
+      });
+      powerGridEntities.push(entity);
+    }
   }
 
-  powerGridEntity = viewer.entities.add({
-    name: 'Power Grid Connections',
-    polyline: {
-      positions: positions,
-      width: 3,
-      material: new Cesium.PolylineGlowMaterialProperty({
-        glowPower: new Cesium.CallbackProperty(() => {
-          // Pulse glow based on total generation (0.1 to 0.5)
-          const loadFactor = Math.min(1.0, (gridState.totalGen || 0) / 1500);
-          return 0.1 + (loadFactor * 0.4);
-        }, false),
-        taperPower: 0.5,
+  initEnergyParticles();
+}
+
+// --- Energy Flow Particles ---
+const particles = [];
+let MAX_PARTICLES = 0; // Will be set based on segments
+const WATTS_PER_PARTICLE = 40; // 1 dot = 40 MW
+
+function initEnergyParticles() {
+  // Clear existing
+  particles.forEach(p => viewer.entities.remove(p.entity));
+  particles.length = 0;
+
+  // Max 4 particles per line
+  MAX_PARTICLES = powerSegments.length * 4;
+
+  for (let i = 0; i < MAX_PARTICLES; i++) {
+    const particle = viewer.entities.add({
+      show: false, // Hidden by default
+      position: new Cesium.CallbackProperty(() => {
+        return particles[i].currentPos;
+      }, false),
+      point: {
+        pixelSize: 9,
         color: new Cesium.CallbackProperty(() => {
-          // Red if unstable frequency, Cyan if stable
+          // Color based on grid stability
           if (gridState.frequency < 49.8 || gridState.frequency > 50.2) {
             return Cesium.Color.ORANGERED;
           }
-          return Cesium.Color.CYAN;
+          return Cesium.Color.WHITE;
         }, false),
-      }),
-      clampToGround: true // Follow the terrain
+        outlineColor: Cesium.Color.CYAN,
+        outlineWidth: 2
+      }
+    });
+
+    // Assign random start segment and progress
+    // To minimize clumping, we could distribute evenly, but random is usually okay with low density.
+    const segmentIdx = i % powerSegments.length; // Distribute evenly initially
+
+    particles.push({
+      entity: particle,
+      segmentIdx: segmentIdx,
+      progress: Math.random(), // 0.0 to 1.0
+      speedOffset: 0.9 + Math.random() * 0.2 // Less variance
+    });
+  }
+}
+
+function updateEnergyParticles(dt) {
+  if (powerSegments.length === 0) return;
+
+  // 1. Pause Check
+  if (!viewer.clock.shouldAnimate) return;
+
+  // 2. Calculate Active Particles based on Load
+  // 1 dot = 40 MW
+  const totalGen = gridState.totalGen || 0;
+  let activeCount = Math.floor(totalGen / WATTS_PER_PARTICLE);
+
+  // Clamp to Max (Density Limit)
+  activeCount = Math.min(activeCount, MAX_PARTICLES);
+
+  // 3. Speed Calculation
+  const simSpeed = Math.abs(viewer.clock.multiplier);
+
+  // Reduced base speed as requested
+  // We want it to match simulation speed but not be too crazy.
+  // At 1x speed, it should be slow and steady.
+  const timeScale = Math.max(1.0, simSpeed / 100);
+  const baseSpeed = 0.15 * timeScale;
+
+  // Update Particles
+  for (let i = 0; i < MAX_PARTICLES; i++) {
+    const p = particles[i];
+
+    if (i < activeCount) {
+      p.entity.show = true;
+
+      // Move
+      p.progress += baseSpeed * p.speedOffset * dt;
+
+      if (p.progress >= 1.0) {
+        p.progress = 0;
+        // Pick new segment. 
+        // To strictly enforce "max 4 per line", we'd need complex tracking.
+        // But since MAX_PARTICLES = Segments * 4, and we only show a subset,
+        // random assignment is statistically safe enough.
+        p.segmentIdx = Math.floor(Math.random() * powerSegments.length);
+      }
+
+      // Update Position
+      const seg = powerSegments[p.segmentIdx];
+      p.currentPos = Cesium.Cartesian3.lerp(seg.start, seg.end, p.progress, new Cesium.Cartesian3());
+
+      const cartographic = Cesium.Cartographic.fromCartesian(p.currentPos);
+      cartographic.height += 25;
+      p.currentPos = Cesium.Cartesian3.fromRadians(cartographic.longitude, cartographic.latitude, cartographic.height);
+
+    } else {
+      p.entity.show = false;
     }
-  });
+  }
 }
 
 drawPowerLines();
@@ -400,6 +510,11 @@ viewer.clock.onTick.addEventListener((clock) => {
   const industrialNoise = (Math.sin(hour * 10) + Math.cos(hour * 23)) * 15; // High freq noise
   gridState.totalDemand = Math.round(baseLoad + morningPeak + eveningPeak + industrialNoise);
 
+  // Update Particles (Visuals)
+  // We want smooth animation, so we use system clock or just a fixed small step
+  // Since this runs every frame, we can use a small constant or calculate dt.
+  updateEnergyParticles(0.05); // Fixed step for smoothness
+
   // 2. Calculate Generation per Plant
   let currentTotalGen = 0;
   let currentRenewableGen = 0;
@@ -436,6 +551,28 @@ viewer.clock.onTick.addEventListener((clock) => {
       currentOutput = maxCap * 0.98;
       emissionFactor = 12; // Very low but non-zero lifecycle
     }
+
+    // --- OPTIMIZATION OVERRIDE ---
+    if (window.optimizationTargets && window.optimizationTargets.has(plant.name)) {
+      const target = window.optimizationTargets.get(plant.name);
+      // Smoothly interpolate towards target (simple P-controller)
+      // If it's renewable (solar/wind), we can't exceed physics limit usually, 
+      // but for this simulation, let's assume storage/curtailment allows matching target 
+      // (or we clamp to physics max if we want to be strict, but user wants ML control).
+      // Let's blend: 
+      // For dispatchable (hydro/nuclear), we follow target.
+      // For variable (solar/wind), we curtail if target < physics, but can't exceed physics.
+
+      if (plant.type === 'solar' || plant.type === 'wind') {
+        currentOutput = Math.min(currentOutput, target);
+      } else {
+        // Hydro/Nuclear/Fossil follow command
+        // Smooth transition
+        const diff = target - currentOutput;
+        currentOutput += diff * 0.1; // 10% per tick approach
+      }
+    }
+    // -----------------------------
 
     currentTotalGen += currentOutput;
     currentCarbonEmissions += currentOutput * emissionFactor;
@@ -499,7 +636,198 @@ viewer.clock.onTick.addEventListener((clock) => {
   if (selectedPlantName) {
     updatePlantDetailPanel(selectedPlantName);
   }
+
+  // 6. Periodic Optimization (every 10 simulation minutes)
+  const currentSimTime = viewer.clock.currentTime.secondsOfDay;
+  if (!window.lastOptimizationTime || Math.abs(currentSimTime - window.lastOptimizationTime) > 600) {
+    window.lastOptimizationTime = currentSimTime;
+    // Calculate hour (0-24)
+    const hour = (currentSimTime / 3600) % 24;
+    fetchOptimization(gridState.totalDemand, hour);
+  }
 });
+
+// --- ML UI Logic ---
+window.optimizationMode = 'off'; // 'off', 'cost', 'impact'
+
+window.setOptimizationMode = function (mode) {
+  window.optimizationMode = mode;
+
+  // Update UI buttons
+  const buttons = document.querySelectorAll('.strategy-btn');
+  buttons.forEach(btn => {
+    if (btn.textContent.toLowerCase().includes(mode === 'impact' ? 'eco' : mode)) {
+      btn.classList.add('active');
+    } else if (mode === 'off' && btn.textContent === 'Physics') {
+      btn.classList.add('active');
+    } else {
+      btn.classList.remove('active');
+    }
+  });
+
+  // Update Indicator
+  const indicator = document.getElementById('mlLiveIndicator');
+  if (mode === 'off') {
+    indicator.classList.remove('active');
+    window.optimizationTargets = null; // Clear targets
+  } else {
+    indicator.classList.add('active');
+    // Trigger immediate fetch
+    const currentSimTime = viewer.clock.currentTime.secondsOfDay;
+    const hour = (currentSimTime / 3600) % 24;
+    fetchOptimization(gridState.totalDemand, hour);
+  }
+};
+
+// Make ML Panel Draggable
+makeElementDraggable('mlControlPanel', '.ml-header');
+
+// --- API Integration ---
+async function fetchOptimization(currentLoad, hour) {
+  if (window.optimizationMode === 'off') return;
+
+  try {
+    const response = await fetch('http://localhost:8000/optimize', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        current_load: currentLoad,
+        hour: hour || 12, // Default to noon if undefined
+        optimization_type: window.optimizationMode
+      }),
+    });
+
+    if (response.ok) {
+      const data = await response.json();
+      applyOptimization(data.distribution);
+      updateMLUI(data.distribution);
+    }
+  } catch (error) {
+    console.error('Optimization fetch failed:', error);
+  }
+}
+
+// --- Chart.js Integration ---
+let mlChart;
+async function initChart() {
+  const ctx = document.getElementById('mlChart').getContext('2d');
+
+  // Fetch forecast data first
+  let forecastData = { solar: [], wind: [] };
+  try {
+    const res = await fetch('http://localhost:8000/forecast');
+    if (res.ok) forecastData = await res.json();
+  } catch (e) { console.error("Forecast fetch failed", e); }
+
+  mlChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: Array.from({ length: 24 }, (_, i) => i), // 0-23 hours
+      datasets: [
+        {
+          label: 'Solar Potential',
+          data: forecastData.solar,
+          borderColor: 'rgba(255, 235, 59, 0.5)',
+          borderDash: [5, 5],
+          borderWidth: 1,
+          pointRadius: 0,
+          fill: false
+        },
+        {
+          label: 'Real-time Gen',
+          data: [], // Will fill as we go? Or just show current point?
+          // Let's show a rolling window or just the current hour's value on top of the profile?
+          // For simplicity, let's just show the profiles for now to visualize the "Day Ahead"
+          // and maybe a dot for current time.
+          borderColor: '#4caf50',
+          borderWidth: 2,
+          pointRadius: 0,
+          fill: true,
+          backgroundColor: 'rgba(76, 175, 80, 0.1)'
+        }
+      ]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { display: false },
+        y: { display: false, min: 0 }
+      },
+      animation: false
+    }
+  });
+}
+
+// Initialize chart
+initChart();
+
+function updateMLUI(distribution) {
+  // Update bars in the ML panel
+  const maxCap = 2500; // Scale for bars
+
+  const updateBar = (type, val) => {
+    const bar = document.getElementById(`ml${type}Bar`);
+    const label = document.getElementById(`ml${type}Val`);
+    if (bar && label) {
+      const pct = Math.min(100, (val / maxCap) * 100);
+      bar.style.width = `${pct}%`;
+      label.textContent = `${Math.round(val)} MW`;
+    }
+  };
+
+  updateBar('Solar', distribution.solar || 0);
+  updateBar('Wind', distribution.wind || 0);
+  updateBar('Hydro', distribution.hydro || 0);
+  updateBar('Nuclear', distribution.nuclear || 0);
+
+  // Update Metric
+  const metricEl = document.getElementById('mlGainValue');
+  if (window.optimizationMode === 'cost') {
+    metricEl.textContent = "$$$ Saved";
+    metricEl.style.color = '#ffeb3b';
+  } else {
+    metricEl.textContent = "CO2 Reduced";
+    metricEl.style.color = '#4caf50';
+  }
+
+  // Update Chart Current Time Indicator (Vertical Line or Point)
+  // For now, let's just re-render if needed, but Chart.js handles animations.
+  // We could add a dataset for "Current Load" if we tracked history.
+}
+
+function applyOptimization(distribution) {
+  // distribution is { solar: 1200, wind: 50, ... }
+
+  bengaluruPlants.forEach(plant => {
+    const targetOutput = distribution[plant.type];
+    if (targetOutput !== undefined) {
+      // We need to distribute the type's total target among individual plants of that type
+      // For simplicity, we'll assume one plant per type or split evenly if multiple
+      // But here we have multiple plants per type (e.g. 2 hydro).
+
+      // Count plants of this type
+      const plantsOfType = bengaluruPlants.filter(p => p.type === plant.type);
+      const count = plantsOfType.length;
+
+      // Assign share
+      const plantTarget = targetOutput / count;
+
+      // Update the plant's real-time data (smooth transition handled in next tick naturally if we used a target property)
+      // For now, let's just override the output in the map for the next tick to pick up?
+      // Actually, the tick loop calculates output based on physics. 
+      // We should probably override the physics if optimization is active.
+
+      // Let's store the optimization target in a global map
+      if (!window.optimizationTargets) window.optimizationTargets = new Map();
+      window.optimizationTargets.set(plant.name, plantTarget);
+    }
+  });
+}
+
 
 function updateDashboard(hour) {
   // Clock
