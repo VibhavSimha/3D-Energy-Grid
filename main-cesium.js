@@ -10,14 +10,14 @@ Cesium.Ion.defaultAccessToken = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJqdGkiOi
 // Power plant locations in Karnataka area
 // TO CHANGE POSITIONS: Update the 'lat' (latitude) and 'lon' (longitude) values below.
 const bengaluruPlants = [
-  { name: 'Tuppadahalli Wind Power Station', type: 'wind', capacity: '56 MW', lat: 13.94903334908406, lon: 76.0486864696537 },
-  { name: 'Kaiga Nuclear Power Plant', type: 'nuclear', capacity: '880 MW', lat: 14.865460, lon: 74.439071 },
-  { name: 'Pavagada Solar Park', type: 'solar', capacity: '2050 MW', lat: 14.139977, lon: 77.314803 },
-  { name: 'Shivanasamudra Hydro Plant', type: 'hydro', capacity: '42 MW', lat: 12.298628, lon: 77.170727 },
-  { name: 'Mahatma Gandhi Hydro Plant', type: 'hydro', capacity: '139 MW', lat: 14.227473, lon: 74.799363 },
-  { name: 'Almatti Dam', type: 'hydro', capacity: '290 MW', lat: 16.331017, lon: 75.887133 },
-  { name: 'Jindal Jogihalli Wind Plant', type: 'wind', capacity: '20 MW', lat: 14.671766, lon: 76.421704 },
-  { name: 'Raichur Solar Park', type: 'solar', capacity: '100 MW', lat: 16.134622, lon: 77.125315 }
+  { name: 'Tuppadahalli Wind Power Station', type: 'wind', capacity: '56 MW', lat: 13.94903334908406, lon: 76.0486864696537, size: 5.0, offsetX: 0, offsetY: 0, offsetZ: 0 },
+  { name: 'Kaiga Nuclear Power Plant', type: 'nuclear', capacity: '880 MW', lat: 14.865460, lon: 74.439071, size: 9.6, offsetX: 0, offsetY: 0, offsetZ: 0 },
+  { name: 'Pavagada Solar Park', type: 'solar', capacity: '2050 MW', lat: 14.139977, lon: 77.314803, size: 5.0, offsetX: 0, offsetY: 0, offsetZ: -660 },
+  { name: 'Shivanasamudra Hydro Plant', type: 'hydro', capacity: '42 MW', lat: 12.298628, lon: 77.170727, size: 5.0, offsetX: 0, offsetY: 0, offsetZ: 0 },
+  { name: 'Mahatma Gandhi Hydro Plant', type: 'hydro', capacity: '139 MW', lat: 14.227473, lon: 74.799363, size: 5.0, offsetX: 0, offsetY: 0, offsetZ: 0 },
+  { name: 'Almatti Dam', type: 'hydro', capacity: '290 MW', lat: 16.331017, lon: 75.887133, size: 14.0, offsetX: 0, offsetY: 0, offsetZ: 0 },
+  { name: 'Jindal Jogihalli Wind Plant', type: 'wind', capacity: '20 MW', lat: 14.671766, lon: 76.421704, size: 5.0, offsetX: 0, offsetY: 0, offsetZ: 0 },
+  { name: 'Raichur Solar Park', type: 'solar', capacity: '100 MW', lat: 16.134622, lon: 77.125315, size: 5.0, offsetX: 0, offsetY: 0, offsetZ: -660 }
 ];
 
 // Initialize Cesium Viewer with 3D terrain (Requires valid Token)
@@ -94,17 +94,11 @@ let selectedPlantName = null; // Track currently selected plant
 
 // Add plant entities to the viewer
 bengaluruPlants.forEach(plant => {
-  // Fix for levitating solar panels:
-  // If it's a solar plant, we might need to lower it slightly or clamp it differently.
-  // Using RELATIVE_TO_GROUND allows us to set a height (altitude).
-  // A negative height will bury it, a positive will lift it.
-  // Adjust 'heightOffset' as needed for your specific model.
-  let heightOffset = 0;
-  if (plant.type === 'solar') {
-    heightOffset = -2500; // Drastically increased offset to fix levitation
-  }
-
-  const position = Cesium.Cartesian3.fromDegrees(plant.lon, plant.lat, heightOffset);
+  // Apply position offsets for manual adjustment
+  const finalLon = plant.lon + (plant.offsetX || 0);
+  const finalLat = plant.lat + (plant.offsetY || 0);
+  const finalHeight = plant.offsetZ || 0;
+  const position = Cesium.Cartesian3.fromDegrees(finalLon, finalLat, finalHeight);
   const color = plantColors[plant.type] || Cesium.Color.WHITE;
 
   viewer.entities.add({
@@ -118,7 +112,7 @@ bengaluruPlants.forEach(plant => {
     model: {
       uri: plantModels[plant.type],
       // TO CHANGE SIZE: Adjust the 'scale' value below.
-      scale: 20.0,
+      scale: plant.size || 5.0,
 
       // --- COMMENT OUT THESE 3 LINES TO RESTORE ORIGINAL COLORS ---
       // color: color, // Tint the model with the plant type color
@@ -384,6 +378,7 @@ closeBtn.addEventListener('click', hidePlantDetail);
 closeBtn.addEventListener('mousedown', (e) => {
   e.stopPropagation();
 });
+
 
 // --- Real-time Simulation Logic ---
 
