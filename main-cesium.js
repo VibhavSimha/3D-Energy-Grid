@@ -125,6 +125,89 @@ bengaluruPlants.forEach(plant => {
   });
 });
 
+// 5. Load Real-World Grid Data (GeoJSON) - Optimized & Chunked
+async function loadRealWorldGrid() {
+  try {
+    const response = await fetch('BengaluruGridNetwork.geojson');
+    const geoJson = await response.json();
+
+    const features = geoJson.features;
+    if (!features) return;
+
+    console.log(`Loading ${features.length} grid elements...`);
+
+    const CHUNK_SIZE = 2000;
+    const points = new Cesium.PointPrimitiveCollection();
+    viewer.scene.primitives.add(points); // Add collection once, populate incrementally
+
+    // Process in chunks to prevent UI freeze / Crash
+    for (let i = 0; i < features.length; i += CHUNK_SIZE) {
+      const chunk = features.slice(i, i + CHUNK_SIZE);
+      const lineInstances = [];
+
+      for (const feature of chunk) {
+        const geometry = feature.geometry;
+        if (!geometry) continue;
+
+        if (geometry.type === 'LineString') {
+          const positions = Cesium.Cartesian3.fromDegreesArray(geometry.coordinates.flat());
+          lineInstances.push(new Cesium.GeometryInstance({
+            geometry: new Cesium.GroundPolylineGeometry({
+              positions: positions,
+              width: 2.0
+            }),
+            attributes: {
+              color: Cesium.ColorGeometryInstanceAttribute.fromColor(Cesium.Color.GOLD.withAlpha(0.5))
+            }
+          }));
+        } else if (geometry.type === 'MultiLineString') {
+          for (const coords of geometry.coordinates) {
+            const positions = Cesium.Cartesian3.fromDegreesArray(coords.flat());
+            lineInstances.push(new Cesium.GeometryInstance({
+              geometry: new Cesium.GroundPolylineGeometry({
+                positions: positions,
+                width: 2.0
+              }),
+              attributes: {
+                color: Cesium.ColorGeometryInstanceAttribute.fromColor(Cesium.Color.GOLD.withAlpha(0.5))
+              }
+            }));
+          }
+        } else if (geometry.type === 'Point') {
+          points.add({
+            position: Cesium.Cartesian3.fromDegrees(geometry.coordinates[0], geometry.coordinates[1]),
+            color: Cesium.Color.ORANGE,
+            pixelSize: 4,
+            translucencyByDistance: new Cesium.NearFarScalar(1.5e2, 1.0, 1.5e5, 0.0)
+          });
+        }
+      }
+
+      // Add Batch of Lines
+      if (lineInstances.length > 0) {
+        viewer.scene.primitives.add(new Cesium.GroundPolylinePrimitive({
+          geometryInstances: lineInstances,
+          appearance: new Cesium.PolylineColorAppearance()
+        }));
+      }
+
+      // Yield to main thread to prevent crash/freeze
+      if (i + CHUNK_SIZE < features.length) {
+        await new Promise(resolve => setTimeout(resolve, 0));
+      }
+
+      console.log(`Loaded chunk ${i / CHUNK_SIZE + 1} / ${Math.ceil(features.length / CHUNK_SIZE)}`);
+    }
+
+    console.log("Full Grid Loaded Successfully");
+
+  } catch (error) {
+    console.error("Failed to load GeoJSON:", error);
+  }
+}
+
+loadRealWorldGrid();
+
 // Draw power lines (connections) between plants to simulate a grid
 let powerGridEntities = []; // Store all line entities
 const powerSegments = []; // Store segments for particle flow
