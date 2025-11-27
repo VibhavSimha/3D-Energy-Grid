@@ -11,7 +11,7 @@ Cesium.Ion.defaultAccessToken = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJqdGkiOi
 // TO CHANGE POSITIONS: Update the 'lat' (latitude) and 'lon' (longitude) values below.
 const bengaluruPlants = [
   { name: 'Tuppadahalli Wind Power Station', type: 'wind', capacity: '56 MW', lat: 13.94903334908406, lon: 76.0486864696537, size: 5.0, offsetX: 0, offsetY: 0, offsetZ: 0 },
-  { name: 'Kaiga Nuclear Power Plant', type: 'nuclear', capacity: '880 MW', lat: 14.865460, lon: 74.439071, size: 9.6, offsetX: 0, offsetY: 0, offsetZ: 0 },
+  { name: 'Kaiga Nuclear Power Plant', type: 'nuclear', capacity: '880 MW', lat: 14.865460, lon: 74.439071, size: 9.6, offsetX: 0, offsetY: 0, offsetZ: -20 },
   { name: 'Pavagada Solar Park', type: 'solar', capacity: '2050 MW', lat: 14.139977, lon: 77.314803, size: 5.0, offsetX: 0, offsetY: 0, offsetZ: -660 },
   { name: 'Shivanasamudra Hydro Plant', type: 'hydro', capacity: '42 MW', lat: 12.298628, lon: 77.170727, size: 5.0, offsetX: 0, offsetY: 0, offsetZ: 0 },
   { name: 'Mahatma Gandhi Hydro Plant', type: 'hydro', capacity: '139 MW', lat: 14.227473, lon: 74.799363, size: 5.0, offsetX: 0, offsetY: 0, offsetZ: 0 },
