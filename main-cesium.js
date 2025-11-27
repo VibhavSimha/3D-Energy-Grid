@@ -454,14 +454,15 @@ function buildPlantListUI() {
         if (entity) {
           viewer.selectedEntity = entity; // Select the entity
           showPlantDetail(plant.name); // Show custom dashboard
-          viewer.camera.flyTo({
-            destination: Cesium.Cartesian3.fromDegrees(plant.lon, plant.lat, 5000), // Fly closer
-            orientation: {
-              heading: Cesium.Math.toRadians(0),
-              pitch: Cesium.Math.toRadians(-35),
-              roll: 0
-            },
-            duration: 1.5
+          
+          // Fix: Use flyTo on the entity to center it properly and maintain selection
+          viewer.flyTo(entity, {
+            duration: 1.5,
+            offset: new Cesium.HeadingPitchRange(
+              Cesium.Math.toRadians(0),   // Heading North
+              Cesium.Math.toRadians(-35), // Pitch down
+              5000                        // Distance from center
+            )
           });
         }
       };
