@@ -10,14 +10,16 @@ Cesium.Ion.defaultAccessToken = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJqdGkiOi
 // Power plant locations in Karnataka area
 // TO CHANGE POSITIONS: Update the 'lat' (latitude) and 'lon' (longitude) values below.
 const bengaluruPlants = [
-  { name: 'Tuppadahalli Wind Power Station', type: 'wind', capacity: '56 MW', lat: 13.94903334908406, lon: 76.0486864696537, size: 5.0, offsetX: 0, offsetY: 0, offsetZ: 0 },
+  { name: 'Tuppadahalli Wind Power Station', type: 'wind', capacity: '56 MW', lat: 13.94903334908406, lon: 76.0486864696537, size: 5.0, offsetX: 0, offsetY: 0, offsetZ: 60 },
   { name: 'Kaiga Nuclear Power Plant', type: 'nuclear', capacity: '880 MW', lat: 14.865460, lon: 74.439071, size: 9.6, offsetX: 0, offsetY: 0, offsetZ: -20 },
   { name: 'Pavagada Solar Park', type: 'solar', capacity: '2050 MW', lat: 14.139977, lon: 77.314803, size: 5.0, offsetX: 0, offsetY: 0, offsetZ: -660 },
   { name: 'Shivanasamudra Hydro Plant', type: 'hydro', capacity: '42 MW', lat: 12.298628, lon: 77.170727, size: 5.0, offsetX: 0, offsetY: 0, offsetZ: 0 },
   { name: 'Mahatma Gandhi Hydro Plant', type: 'hydro', capacity: '139 MW', lat: 14.227473, lon: 74.799363, size: 5.0, offsetX: 0, offsetY: 0, offsetZ: 0 },
   { name: 'Almatti Dam', type: 'hydro', capacity: '290 MW', lat: 16.331017, lon: 75.887133, size: 14.0, offsetX: 0, offsetY: 0, offsetZ: 0 },
-  { name: 'Jindal Jogihalli Wind Plant', type: 'wind', capacity: '20 MW', lat: 14.671766, lon: 76.421704, size: 5.0, offsetX: 0, offsetY: 0, offsetZ: 0 },
-  { name: 'Raichur Solar Park', type: 'solar', capacity: '100 MW', lat: 16.134622, lon: 77.125315, size: 5.0, offsetX: 0, offsetY: 0, offsetZ: -660 }
+  { name: 'Jindal Jogihalli Wind Plant', type: 'wind', capacity: '20 MW', lat: 14.671766, lon: 76.421704, size: 5.0, offsetX: 0, offsetY: 0, offsetZ: 60 },
+  { name: 'Raichur Solar Park', type: 'solar', capacity: '100 MW', lat: 16.134622, lon: 77.125315, size: 5.0, offsetX: 0, offsetY: 0, offsetZ: -460 },
+  { name: 'Adani Power Plant', type: 'coal', capacity: '1200 MW', lat: 13.160076, lon: 74.798259, size: 25.0, offsetX: 0, offsetY: 0, offsetZ: 0 },
+  { name: 'Bellary Thermal Power Station', type: 'coal', capacity: '1700 MW', lat: 15.196038, lon: 76.717809, size: 25.0, offsetX: 0, offsetY: 0, offsetZ: 0 }
 ];
 
 // Initialize Cesium Viewer with 3D terrain (Requires valid Token)
@@ -67,7 +69,8 @@ const plantColors = {
   hydro: Cesium.Color.DEEPSKYBLUE,
   nuclear: Cesium.Color.ORANGE,
   solar: Cesium.Color.YELLOW,
-  wind: Cesium.Color.CYAN
+  wind: Cesium.Color.CYAN,
+  coal: Cesium.Color.DARKSLATEGRAY
 };
 
 // Paths to the 3D models (GLB format required for Cesium)
@@ -75,7 +78,8 @@ const plantModels = {
   hydro: 'models/energy-plants/gravity-dam/USACE-3D-22-002-dam_converted.glb',
   nuclear: 'models/energy-plants/nuclear-power-plant/ImageToStl.com_aes/aes_converted.glb',
   solar: 'models/energy-plants/Solar_Panels_V1_L3.123cc8f890de-f0dc-4416-91ba-2d06cafb9a74/Solar_Panels_V1_L3.123cc8f890de-f0dc-4416-91ba-2d06cafb9a74/10781_Solar-Panels_V1_converted.glb',
-  wind: 'models/energy-plants/38-eolic-obj/EolicOBJ_converted.glb'
+  wind: 'models/energy-plants/38-eolic-obj/wind_turbine.glb',
+  coal: 'models/energy-plants/Coal/low_poly_coal_plant_stylized_-_animated.glb'
 };
 
 // Simulation State (Global)
@@ -410,7 +414,8 @@ function buildPlantListUI() {
     hydro: [],
     nuclear: [],
     solar: [],
-    wind: []
+    wind: [],
+    coal: []
   };
 
   // Group plants by type
@@ -663,6 +668,11 @@ viewer.clock.onTick.addEventListener((clock) => {
       // Nuclear: Base load, very stable
       currentOutput = maxCap * 0.98;
       emissionFactor = 12; // Very low but non-zero lifecycle
+    } else if (plant.type === 'coal') {
+      // Coal: Dispatchable, high emissions
+      const demandFactor = (gridState.totalDemand - 600) / 500;
+      currentOutput = maxCap * (0.6 + Math.max(0, demandFactor * 0.4));
+      emissionFactor = 820;
     }
 
     // --- OPTIMIZATION OVERRIDE ---
@@ -896,6 +906,7 @@ function updateMLUI(distribution) {
   updateBar('Wind', distribution.wind || 0);
   updateBar('Hydro', distribution.hydro || 0);
   updateBar('Nuclear', distribution.nuclear || 0);
+  updateBar('Coal', distribution.coal || 0);
 
   // Update Metric
   const metricEl = document.getElementById('mlGainValue');
