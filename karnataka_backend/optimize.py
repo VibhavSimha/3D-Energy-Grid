@@ -37,6 +37,8 @@ def dispatch_greedy(
     required_load_mw: float,
     available_mw: Dict[str, float],
     weights: DispatchWeights = DispatchWeights(),
+    ensure_meet_load: bool = True,
+    fallback_source: str = "grid_import",
 ) -> DispatchResult:
     if required_load_mw <= 0:
         raise ValueError("required_load_mw must be > 0")
@@ -57,6 +59,18 @@ def dispatch_greedy(
         remaining -= use
 
     total = sum(allocation.values())
+
+    if ensure_meet_load and remaining > 0:
+        # Explicitly represent unmet demand as grid import / backup supply.
+        # This keeps the plan always meeting load without pretending coal/misc magically exceeds capacity.
+        allocation[fallback_source] = allocation.get(fallback_source, 0.0) + float(remaining)
+        total += float(remaining)
+        remaining = 0.0
+
+        # If fallback has a score, include it for traceability.
+        if fallback_source not in dict(ordered_scores):
+            ordered_scores.append((fallback_source, combined_score(fallback_source, weights)))
+
     return DispatchResult(
         allocation_mw=allocation,
         total_generated_mw=total,

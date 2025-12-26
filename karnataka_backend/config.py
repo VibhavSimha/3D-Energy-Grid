@@ -69,6 +69,7 @@ DEFAULT_SCORES = DispatchScores(
         "coal": 8.5,
         "misc_renew": 6.5,
         "misc_nonrenew": 6.0,
+        "grid_import": 12.0,
     },
     impact={
         "solar": 5,
@@ -78,6 +79,7 @@ DEFAULT_SCORES = DispatchScores(
         "coal": -5.5,
         "misc_renew": 1,
         "misc_nonrenew": -3,
+        "grid_import": -6.0,
     },
 )
 

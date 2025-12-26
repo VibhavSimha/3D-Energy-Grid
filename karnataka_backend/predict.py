@@ -6,10 +6,16 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, Optional
 
+from datetime import timezone
+from zoneinfo import ZoneInfo
+
 import joblib
 
 from .config import KarnatakaCapacities, LoadScaling
 from .data import BASKET_FORMULAS, features_from_sim_time
+
+
+_IST = ZoneInfo("Asia/Kolkata")
 
 
 def _models_dir() -> str:
@@ -48,6 +54,13 @@ class Predictor:
     def predict(self, simulation_time: datetime) -> Predictions:
         X = features_from_sim_time(simulation_time)
 
+        # Local time (Karnataka) used for physics constraints like solar night clamp.
+        if simulation_time.tzinfo is None:
+            sim_time_utc = simulation_time.replace(tzinfo=timezone.utc)
+        else:
+            sim_time_utc = simulation_time
+        local_time = sim_time_utc.astimezone(_IST).replace(tzinfo=None)
+
         # Raw load (Spain scale)
         raw_load = float(self.models["load"].predict(X)[0])
         max_load = float(self.stats.get("max_load", 1.0))
@@ -66,6 +79,12 @@ class Predictor:
             max_val = float(self.stats.get(f"max_{bucket}", 1.0))
             factor = max(0.0, raw / max_val) if max_val > 0 else 0.0
             factor = min(1.0, factor)
+
+            # Hard physical constraint: solar produces only in daytime.
+            if bucket == "solar":
+                if local_time.hour < 6 or local_time.hour >= 18:
+                    factor = 0.0
+
             factors[bucket] = factor
             mw_by_bucket[bucket] = factor * float(cap_map[bucket])
 

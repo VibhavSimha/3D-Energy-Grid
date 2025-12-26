@@ -764,9 +764,7 @@ viewer.clock.onTick.addEventListener((clock) => {
   const currentSimTime = viewer.clock.currentTime.secondsOfDay;
   if (!window.lastOptimizationTime || Math.abs(currentSimTime - window.lastOptimizationTime) > 600) {
     window.lastOptimizationTime = currentSimTime;
-    // Calculate hour (0-24)
-    const hour = (currentSimTime / 3600) % 24;
-    fetchOptimization(gridState.totalDemand, hour);
+    fetchOptimization(gridState.totalDemand);
   }
 });
 
@@ -796,9 +794,7 @@ window.setOptimizationMode = function (mode) {
   } else {
     indicator.classList.add('active');
     // Trigger immediate fetch
-    const currentSimTime = viewer.clock.currentTime.secondsOfDay;
-    const hour = (currentSimTime / 3600) % 24;
-    fetchOptimization(gridState.totalDemand, hour);
+    fetchOptimization(gridState.totalDemand);
   }
 };
 
@@ -806,10 +802,11 @@ window.setOptimizationMode = function (mode) {
 makeElementDraggable('mlControlPanel', '.ml-header');
 
 // --- API Integration ---
-async function fetchOptimization(currentLoad, hour) {
+async function fetchOptimization(currentLoad) {
   if (window.optimizationMode === 'off') return;
 
   try {
+    const simulationTimeIso = Cesium.JulianDate.toIso8601(viewer.clock.currentTime);
     const response = await fetch('http://localhost:8000/optimize', {
       method: 'POST',
       headers: {
@@ -817,7 +814,7 @@ async function fetchOptimization(currentLoad, hour) {
       },
       body: JSON.stringify({
         current_load: currentLoad,
-        hour: hour || 12, // Default to noon if undefined
+        simulation_time: simulationTimeIso,
         optimization_type: window.optimizationMode
       }),
     });
@@ -926,29 +923,24 @@ function updateMLUI(distribution) {
 function applyOptimization(distribution) {
   // distribution is { solar: 1200, wind: 50, ... }
 
-  bengaluruPlants.forEach(plant => {
-    const targetOutput = distribution[plant.type];
-    if (targetOutput !== undefined) {
-      // We need to distribute the type's total target among individual plants of that type
-      // For simplicity, we'll assume one plant per type or split evenly if multiple
-      // But here we have multiple plants per type (e.g. 2 hydro).
+  if (!window.optimizationTargets) window.optimizationTargets = new Map();
 
-      // Count plants of this type
-      const plantsOfType = bengaluruPlants.filter(p => p.type === plant.type);
-      const count = plantsOfType.length;
+  // Split each type total across that type's plants proportional to plant capacity.
+  // This ensures the two coal plants don't get the same MW target, etc.
+  Object.keys(distribution || {}).forEach((type) => {
+    const targetOutput = distribution[type];
+    if (targetOutput === undefined) return;
 
-      // Assign share
-      const plantTarget = targetOutput / count;
+    const plantsOfType = bengaluruPlants.filter(p => p.type === type);
+    if (plantsOfType.length === 0) return;
 
-      // Update the plant's real-time data (smooth transition handled in next tick naturally if we used a target property)
-      // For now, let's just override the output in the map for the next tick to pick up?
-      // Actually, the tick loop calculates output based on physics. 
-      // We should probably override the physics if optimization is active.
+    const totalTypeCap = plantsOfType.reduce((sum, p) => sum + parseCapacity(p.capacity), 0);
+    const denom = totalTypeCap > 0 ? totalTypeCap : plantsOfType.length;
 
-      // Let's store the optimization target in a global map
-      if (!window.optimizationTargets) window.optimizationTargets = new Map();
-      window.optimizationTargets.set(plant.name, plantTarget);
-    }
+    plantsOfType.forEach(p => {
+      const share = totalTypeCap > 0 ? (parseCapacity(p.capacity) / denom) : (1 / denom);
+      window.optimizationTargets.set(p.name, targetOutput * share);
+    });
   });
 }
 
