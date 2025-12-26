@@ -96,6 +96,9 @@ const gridState = {
 const plantRealtimeData = new Map(); // Store real-time data for each plant
 let selectedPlantName = null; // Track currently selected plant
 
+// Backend-driven totals (when optimization is enabled)
+let lastBackendDistribution = null; // {solar, wind, hydro, nuclear, coal}
+
 // Add plant entities to the viewer
 bengaluruPlants.forEach(plant => {
   // Apply position offsets for manual adjustment
@@ -289,6 +292,16 @@ function drawPowerLines() {
 const particles = [];
 let MAX_PARTICLES = 0;
 const WATTS_PER_PARTICLE = 40; // 1 dot = 40 MW
+
+// Limit Cesium animation speed so the UI stays readable.
+const MAX_ABS_CLOCK_MULTIPLIER = 7200;
+
+function clampClockMultiplier() {
+  const m = viewer.clock.multiplier;
+  if (Math.abs(m) > MAX_ABS_CLOCK_MULTIPLIER) {
+    viewer.clock.multiplier = Math.sign(m) * MAX_ABS_CLOCK_MULTIPLIER;
+  }
+}
 
 function initEnergyParticles() {
   // Clear existing
@@ -582,7 +595,12 @@ function updatePlantDetailPanel(plantName) {
   const data = plantRealtimeData.get(plantName);
   if (!data) return;
 
+  const plant = bengaluruPlants.find(p => p.name === plantName);
+  const capText = plant?.capacity || `${data.maxCapacity} MW`;
+
   document.getElementById('detailName').textContent = plantName;
+  const capEl = document.getElementById('detailCapacity');
+  if (capEl) capEl.textContent = capText;
   document.getElementById('detailType').textContent = data.type.toUpperCase();
 
   const statusElem = document.getElementById('detailStatus');
@@ -595,8 +613,6 @@ function updatePlantDetailPanel(plantName) {
   const pct = Math.min(100, (data.output / data.maxCapacity) * 100);
   document.getElementById('detailOutputBar').style.width = `${pct}%`;
 
-  document.getElementById('detailEfficiency').textContent = `${data.efficiency.toFixed(1)}%`;
-  document.getElementById('detailTemp').textContent = `${data.temperature.toFixed(1)}°C`;
 }
 
 // Close button handler
@@ -617,6 +633,11 @@ function parseCapacity(capStr) {
 
 // Update Simulation Loop (runs every frame)
 viewer.clock.onTick.addEventListener((clock) => {
+  clampClockMultiplier();
+
+  // Update the ML panel clock from Cesium simulation time (IST display).
+  updateSimClockDisplay(clock.currentTime);
+
   const time = Cesium.JulianDate.toGregorianDate(clock.currentTime);
   const hour = time.hour + time.minute / 60; // 0.0 to 24.0
 
@@ -637,6 +658,8 @@ viewer.clock.onTick.addEventListener((clock) => {
   let currentTotalGen = 0;
   let currentRenewableGen = 0;
   let currentCarbonEmissions = 0; // kgCO2/h
+
+  const typeTotals = { solar: 0, wind: 0, hydro: 0, nuclear: 0, coal: 0 };
 
   bengaluruPlants.forEach(plant => {
     const maxCap = parseCapacity(plant.capacity);
@@ -675,25 +698,13 @@ viewer.clock.onTick.addEventListener((clock) => {
       emissionFactor = 820;
     }
 
-    // --- OPTIMIZATION OVERRIDE ---
+    // --- OPTIMIZATION OVERRIDE (backend is authoritative) ---
     if (window.optimizationTargets && window.optimizationTargets.has(plant.name)) {
       const target = window.optimizationTargets.get(plant.name);
       // Smoothly interpolate towards target (simple P-controller)
-      // If it's renewable (solar/wind), we can't exceed physics limit usually, 
-      // but for this simulation, let's assume storage/curtailment allows matching target 
-      // (or we clamp to physics max if we want to be strict, but user wants ML control).
-      // Let's blend: 
-      // For dispatchable (hydro/nuclear), we follow target.
-      // For variable (solar/wind), we curtail if target < physics, but can't exceed physics.
-
-      if (plant.type === 'solar' || plant.type === 'wind') {
-        currentOutput = Math.min(currentOutput, target);
-      } else {
-        // Hydro/Nuclear/Fossil follow command
-        // Smooth transition
-        const diff = target - currentOutput;
-        currentOutput += diff * 0.1; // 10% per tick approach
-      }
+      const diff = target - currentOutput;
+      currentOutput += diff * 0.15;
+      currentOutput = Math.max(0, Math.min(currentOutput, maxCap));
     }
     // -----------------------------
 
@@ -704,12 +715,12 @@ viewer.clock.onTick.addEventListener((clock) => {
       currentRenewableGen += currentOutput;
     }
 
+    typeTotals[plant.type] += currentOutput;
+
     // Store real-time data for this plant
     plantRealtimeData.set(plant.name, {
       output: currentOutput,
       maxCapacity: maxCap,
-      efficiency: (currentOutput / maxCap) * 100,
-      temperature: 25 + (currentOutput / maxCap) * 40 + (Math.random() * 2), // Simulated temp
       status: currentOutput > 0.1 ? 'ONLINE' : 'STANDBY',
       type: plant.type
     });
@@ -748,9 +759,16 @@ viewer.clock.onTick.addEventListener((clock) => {
   gridState.totalRevenue += revenueTick;
 
   // Metrics
-  gridState.totalGen = Math.round(currentTotalGen);
-  gridState.renewablePct = Math.round((currentRenewableGen / currentTotalGen) * 100) || 0;
-  gridState.carbonIntensity = Math.round(currentCarbonEmissions / currentTotalGen); // gCO2/kWh approx
+  if (window.optimizationMode !== 'off' && lastBackendDistribution) {
+    // Use backend totals for UI + particle flow so they match what the panel displays.
+    const total = Object.values(lastBackendDistribution).reduce((a, b) => a + b, 0);
+    const renewable = (lastBackendDistribution.solar || 0) + (lastBackendDistribution.wind || 0) + (lastBackendDistribution.hydro || 0);
+    gridState.totalGen = Math.round(total);
+    gridState.renewablePct = Math.round((renewable / total) * 100) || 0;
+  } else {
+    gridState.totalGen = Math.round(currentTotalGen);
+    gridState.renewablePct = Math.round((currentRenewableGen / currentTotalGen) * 100) || 0;
+  }
 
   // 4. Update Dashboard UI
   // updateDashboard(hour);
@@ -765,6 +783,11 @@ viewer.clock.onTick.addEventListener((clock) => {
   if (!window.lastOptimizationTime || Math.abs(currentSimTime - window.lastOptimizationTime) > 600) {
     window.lastOptimizationTime = currentSimTime;
     fetchOptimization(gridState.totalDemand);
+  }
+
+  // Keep the left panel values live even in Physics mode.
+  if (window.optimizationMode === 'off') {
+    updateMLUI(typeTotals);
   }
 });
 
@@ -791,6 +814,7 @@ window.setOptimizationMode = function (mode) {
   if (mode === 'off') {
     indicator.classList.remove('active');
     window.optimizationTargets = null; // Clear targets
+    lastBackendDistribution = null;
   } else {
     indicator.classList.add('active');
     // Trigger immediate fetch
@@ -801,12 +825,45 @@ window.setOptimizationMode = function (mode) {
 // Make ML Panel Draggable
 makeElementDraggable('mlControlPanel', '.ml-header');
 
+function format2(n) {
+  return String(n).padStart(2, '0');
+}
+
+function updateSimClockDisplay(julianTime) {
+  const date = Cesium.JulianDate.toDate(julianTime);
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Kolkata',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(date);
+  const hh = parts.find(p => p.type === 'hour')?.value ?? '00';
+  const mm = parts.find(p => p.type === 'minute')?.value ?? '00';
+  const el = document.getElementById('clockDisplay');
+  if (el) el.textContent = `${hh}:${mm}`;
+}
+
+// CleanedData is historical; we intentionally ignore date.
+// We send a fixed IST date with the current simulated IST hour/minute.
+function buildFixedIstSimulationIso() {
+  const date = Cesium.JulianDate.toDate(viewer.clock.currentTime);
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Kolkata',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(date);
+  const hh = parts.find(p => p.type === 'hour')?.value ?? '00';
+  const mm = parts.find(p => p.type === 'minute')?.value ?? '00';
+  return `2023-07-01T${hh}:${mm}:00+05:30`;
+}
+
 // --- API Integration ---
 async function fetchOptimization(currentLoad) {
   if (window.optimizationMode === 'off') return;
 
   try {
-    const simulationTimeIso = Cesium.JulianDate.toIso8601(viewer.clock.currentTime);
+    const simulationTimeIso = buildFixedIstSimulationIso();
     const response = await fetch('http://localhost:8000/optimize', {
       method: 'POST',
       headers: {
@@ -821,6 +878,7 @@ async function fetchOptimization(currentLoad) {
 
     if (response.ok) {
       const data = await response.json();
+      lastBackendDistribution = data.distribution;
       applyOptimization(data.distribution);
       updateMLUI(data.distribution);
     }
@@ -828,62 +886,6 @@ async function fetchOptimization(currentLoad) {
     console.error('Optimization fetch failed:', error);
   }
 }
-
-// --- Chart.js Integration ---
-let mlChart;
-async function initChart() {
-  const ctx = document.getElementById('mlChart').getContext('2d');
-
-  // Fetch forecast data first
-  let forecastData = { solar: [], wind: [] };
-  try {
-    const res = await fetch('http://localhost:8000/forecast');
-    if (res.ok) forecastData = await res.json();
-  } catch (e) { console.error("Forecast fetch failed", e); }
-
-  mlChart = new Chart(ctx, {
-    type: 'line',
-    data: {
-      labels: Array.from({ length: 24 }, (_, i) => i), // 0-23 hours
-      datasets: [
-        {
-          label: 'Solar Potential',
-          data: forecastData.solar,
-          borderColor: 'rgba(255, 235, 59, 0.5)',
-          borderDash: [5, 5],
-          borderWidth: 1,
-          pointRadius: 0,
-          fill: false
-        },
-        {
-          label: 'Real-time Gen',
-          data: [], // Will fill as we go? Or just show current point?
-          // Let's show a rolling window or just the current hour's value on top of the profile?
-          // For simplicity, let's just show the profiles for now to visualize the "Day Ahead"
-          // and maybe a dot for current time.
-          borderColor: '#4caf50',
-          borderWidth: 2,
-          pointRadius: 0,
-          fill: true,
-          backgroundColor: 'rgba(76, 175, 80, 0.1)'
-        }
-      ]
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      plugins: { legend: { display: false } },
-      scales: {
-        x: { display: false },
-        y: { display: false, min: 0 }
-      },
-      animation: false
-    }
-  });
-}
-
-// Initialize chart
-initChart();
 
 function updateMLUI(distribution) {
   // Update bars in the ML panel
@@ -904,20 +906,6 @@ function updateMLUI(distribution) {
   updateBar('Hydro', distribution.hydro || 0);
   updateBar('Nuclear', distribution.nuclear || 0);
   updateBar('Coal', distribution.coal || 0);
-
-  // Update Metric
-  const metricEl = document.getElementById('mlGainValue');
-  if (window.optimizationMode === 'cost') {
-    metricEl.textContent = "$$$ Saved";
-    metricEl.style.color = '#ffeb3b';
-  } else {
-    metricEl.textContent = "CO2 Reduced";
-    metricEl.style.color = '#4caf50';
-  }
-
-  // Update Chart Current Time Indicator (Vertical Line or Point)
-  // For now, let's just re-render if needed, but Chart.js handles animations.
-  // We could add a dataset for "Current Load" if we tracked history.
 }
 
 function applyOptimization(distribution) {

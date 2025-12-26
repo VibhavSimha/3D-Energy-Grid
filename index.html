@@ -731,7 +731,6 @@
       }
     }
   </style>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 
 <body>
@@ -825,15 +824,6 @@
         </div>
       </div>
     </div>
-
-    <div id="chartContainer">
-      <canvas id="mlChart"></canvas>
-    </div>
-
-    <div class="metric-gain">
-      <div class="gain-value" id="mlGainValue">--</div>
-      <div class="gain-label">Optimization Metric</div>
-    </div>
   </div>
 
   <!-- Plant Detail Dashboard -->
@@ -843,6 +833,10 @@
       <button id="closeDetail" class="close-btn">×</button>
     </div>
     <div class="detail-content">
+      <div class="detail-row">
+        <span class="detail-label">Capacity</span>
+        <span class="detail-value" id="detailCapacity">0 MW</span>
+      </div>
       <div class="detail-row">
         <span class="detail-label">Type</span>
         <span class="detail-value" id="detailType">Solar</span>
@@ -858,17 +852,6 @@
       </div>
       <div class="monitor-bar-bg">
         <div id="detailOutputBar" class="monitor-bar-fill" style="width: 0%"></div>
-      </div>
-
-      <div class="detail-grid">
-        <div class="mini-stat">
-          <span class="label">Efficiency</span>
-          <span class="value" id="detailEfficiency">0%</span>
-        </div>
-        <div class="mini-stat">
-          <span class="label">Temperature</span>
-          <span class="value" id="detailTemp">0°C</span>
-        </div>
       </div>
     </div>
   </div>
