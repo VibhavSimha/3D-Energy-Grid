@@ -1,0 +1,10 @@
+{
+  "max_load": 41015.0,
+  "max_solar": 5792.0,
+  "max_wind": 17436.0,
+  "max_nuclear": 7117.0,
+  "max_coal": 9320.0,
+  "max_hydro": 11613.0,
+  "max_misc_renew": 676.0,
+  "max_misc_nonrenew": 20775.0
+}
