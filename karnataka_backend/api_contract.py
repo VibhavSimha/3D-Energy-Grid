@@ -4,8 +4,6 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Dict, Optional
 
-from .config import DispatchWeights
-from .optimize import dispatch_greedy
 from .predict import Predictor
 
 
@@ -26,7 +24,7 @@ def _merge_to_cesium_types(allocation_mw: Dict[str, float]) -> Dict[str, float]:
     Cesium currently has: solar, wind, hydro, nuclear, coal.
     We fold proxy buckets into these:
       - misc_renew -> hydro (renewable dispatchable bucket)
-      - misc_nonrenew + grid_import -> coal (thermal/backup bucket)
+            - misc_nonrenew -> coal (thermal bucket)
     """
     solar = float(allocation_mw.get("solar", 0.0))
     wind = float(allocation_mw.get("wind", 0.0))
@@ -35,7 +33,6 @@ def _merge_to_cesium_types(allocation_mw: Dict[str, float]) -> Dict[str, float]:
     coal = (
         float(allocation_mw.get("coal", 0.0))
         + float(allocation_mw.get("misc_nonrenew", 0.0))
-        + float(allocation_mw.get("grid_import", 0.0))
     )
 
     return {
@@ -45,6 +42,28 @@ def _merge_to_cesium_types(allocation_mw: Dict[str, float]) -> Dict[str, float]:
         "nuclear": nuclear,
         "coal": coal,
     }
+
+
+def _spread_load(required_load_mw: float, predicted_mw: Dict[str, float]) -> Dict[str, float]:
+    """Scale predicted basket MW values to sum exactly to required_load_mw.
+
+    This keeps the load unchanged and preserves the model's relative basket mix.
+    """
+    if required_load_mw < 0:
+        raise ValueError("required_load_mw must be >= 0")
+
+    cleaned = {k: max(0.0, float(v)) for k, v in predicted_mw.items()}
+    total = float(sum(cleaned.values()))
+
+    if total <= 0.0:
+        if not cleaned:
+            return {}
+        # Degenerate fallback: split evenly if the model returns all zeros.
+        per = float(required_load_mw) / float(len(cleaned)) if len(cleaned) else 0.0
+        return {k: per for k in cleaned.keys()}
+
+    scale = float(required_load_mw) / total
+    return {k: v * scale for k, v in cleaned.items()}
 
 
 def run_backend(
@@ -74,19 +93,17 @@ def run_backend(
 
     required_load_mw = float(current_load_mw) if current_load_mw is not None else float(preds.load_mw)
 
-    weights = DispatchWeights(cost_weight=cost_weight, impact_weight=impact_weight)
-    dispatch = dispatch_greedy(required_load_mw, preds.mw_by_bucket, weights, ensure_meet_load=True)
-
-    cesium_distribution = _merge_to_cesium_types(dispatch.allocation_mw)
+    allocation = _spread_load(required_load_mw, preds.mw_by_bucket)
+    cesium_distribution = _merge_to_cesium_types(allocation)
 
     return BackendResponse(
         simulation_time=sim_time.isoformat(),
         predicted_load_mw=preds.load_mw,
         required_load_mw=required_load_mw,
         available_mw=preds.mw_by_bucket,
-        allocation_mw=dispatch.allocation_mw,
+        allocation_mw=allocation,
         cesium_distribution_mw=cesium_distribution,
-        unmet_load_mw=dispatch.unmet_load_mw,
+        unmet_load_mw=0.0,
     )
 
 

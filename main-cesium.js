@@ -98,6 +98,8 @@ let selectedPlantName = null; // Track currently selected plant
 
 // Backend-driven totals (when optimization is enabled)
 let lastBackendDistribution = null; // {solar, wind, hydro, nuclear, coal}
+let lastBackendBaskets = null; // full basket allocations: solar/wind/hydro/nuclear/coal/misc_renew/misc_nonrenew
+let lastBackendRequiredLoad = null;
 
 // Add plant entities to the viewer
 bengaluruPlants.forEach(plant => {
@@ -635,19 +637,26 @@ function parseCapacity(capStr) {
 viewer.clock.onTick.addEventListener((clock) => {
   clampClockMultiplier();
 
-  // Update the ML panel clock from Cesium simulation time (IST display).
+  // Update the ML panel clock from Cesium simulation time (UTC display).
   updateSimClockDisplay(clock.currentTime);
 
-  const time = Cesium.JulianDate.toGregorianDate(clock.currentTime);
-  const hour = time.hour + time.minute / 60; // 0.0 to 24.0
+  const utc = getUtcHourMinute(clock.currentTime);
+  const hour = utc.hourFloat; // UTC hour (0.0 to 24.0)
 
-  // 1. Calculate Demand Curve (Advanced Model)
-  // Base load + Morning/Evening Peaks + Industrial Noise
-  const baseLoad = 600;
-  const morningPeak = 350 * Math.exp(-Math.pow(hour - 9.5, 2) / 3); // Peak at 9:30 AM
-  const eveningPeak = 450 * Math.exp(-Math.pow(hour - 19.5, 2) / 4); // Peak at 7:30 PM
-  const industrialNoise = (Math.sin(hour * 10) + Math.cos(hour * 23)) * 15; // High freq noise
-  gridState.totalDemand = Math.round(baseLoad + morningPeak + eveningPeak + industrialNoise);
+  // 1. Demand: prefer backend predicted/required load (real data).
+  // Fallback to the legacy synthetic curve only until the first backend response arrives.
+  if (typeof lastBackendRequiredLoad === 'number' && isFinite(lastBackendRequiredLoad)) {
+    gridState.totalDemand = Math.round(lastBackendRequiredLoad);
+  } else {
+    const baseLoad = 600;
+    const morningPeak = 350 * Math.exp(-Math.pow(hour - 9.5, 2) / 3);
+    const eveningPeak = 450 * Math.exp(-Math.pow(hour - 19.5, 2) / 4);
+    const industrialNoise = (Math.sin(hour * 10) + Math.cos(hour * 23)) * 15;
+    gridState.totalDemand = Math.round(baseLoad + morningPeak + eveningPeak + industrialNoise);
+  }
+
+  const loadEl = document.getElementById('mlTotalLoadVal');
+  if (loadEl) loadEl.textContent = `${gridState.totalDemand.toLocaleString()} MW`;
 
   // Update Particles (Visuals)
   // We want smooth animation, so we use system clock or just a fixed small step
@@ -661,7 +670,8 @@ viewer.clock.onTick.addEventListener((clock) => {
 
   const typeTotals = { solar: 0, wind: 0, hydro: 0, nuclear: 0, coal: 0 };
 
-  bengaluruPlants.forEach(plant => {
+  // First pass: compute raw plant outputs.
+  const plantOutputs = bengaluruPlants.map((plant) => {
     const maxCap = parseCapacity(plant.capacity);
     let currentOutput = 0;
     let emissionFactor = 0; // kgCO2/MWh
@@ -671,57 +681,51 @@ viewer.clock.onTick.addEventListener((clock) => {
       if (hour > 6 && hour < 18) {
         const sunIntensity = Math.max(0, Math.sin(((hour - 6) / 12) * Math.PI));
         currentOutput = maxCap * sunIntensity;
-        // Cloud cover simulation (Perlin-like noise)
         const cloudCover = Math.sin(hour * 5) * 0.1 + 0.9;
         currentOutput *= cloudCover;
       }
       emissionFactor = 0;
     } else if (plant.type === 'wind') {
-      // Wind: Diurnal pattern + Gusts
-      const windBase = 0.4 + 0.3 * Math.sin((hour - 14) / 24 * Math.PI * 2); // Higher in evening
+      const windBase = 0.4 + 0.3 * Math.sin((hour - 14) / 24 * Math.PI * 2);
       const gust = (Math.sin(hour * 45) * 0.2);
       currentOutput = maxCap * Math.max(0, windBase + gust);
       emissionFactor = 0;
     } else if (plant.type === 'hydro') {
-      // Hydro: Dispatchable - ramps up to meet demand peaks
-      const demandFactor = (gridState.totalDemand - 600) / 500; // Normalized peak demand
+      const demandFactor = (gridState.totalDemand - 600) / 500;
       currentOutput = maxCap * (0.4 + Math.max(0, demandFactor * 0.6));
       emissionFactor = 0;
     } else if (plant.type === 'nuclear') {
-      // Nuclear: Base load, very stable
       currentOutput = maxCap * 0.98;
-      emissionFactor = 12; // Very low but non-zero lifecycle
+      emissionFactor = 12;
     } else if (plant.type === 'coal') {
-      // Coal: Dispatchable, high emissions
       const demandFactor = (gridState.totalDemand - 600) / 500;
       currentOutput = maxCap * (0.6 + Math.max(0, demandFactor * 0.4));
       emissionFactor = 820;
     }
 
-    // --- OPTIMIZATION OVERRIDE (backend is authoritative) ---
+    // Optimization mode overrides physics.
     if (window.optimizationTargets && window.optimizationTargets.has(plant.name)) {
       const target = window.optimizationTargets.get(plant.name);
-      // Smoothly interpolate towards target (simple P-controller)
       const diff = target - currentOutput;
       currentOutput += diff * 0.15;
-      currentOutput = Math.max(0, Math.min(currentOutput, maxCap));
-    }
-    // -----------------------------
-
-    currentTotalGen += currentOutput;
-    currentCarbonEmissions += currentOutput * emissionFactor;
-
-    if (['solar', 'wind', 'hydro'].includes(plant.type)) {
-      currentRenewableGen += currentOutput;
     }
 
-    typeTotals[plant.type] += currentOutput;
+    currentOutput = Math.max(0, Math.min(currentOutput, maxCap));
+    return { plant, maxCap, output: currentOutput, emissionFactor };
+  });
 
-    // Store real-time data for this plant
+  // Second pass: aggregate + store per-plant realtime.
+  plantOutputs.forEach(({ plant, maxCap, output, emissionFactor }) => {
+    currentTotalGen += output;
+    currentCarbonEmissions += output * emissionFactor;
+    if (['solar', 'wind', 'hydro', 'nuclear'].includes(plant.type)) {
+      currentRenewableGen += output;
+    }
+    typeTotals[plant.type] += output;
     plantRealtimeData.set(plant.name, {
-      output: currentOutput,
+      output: output,
       maxCapacity: maxCap,
-      status: currentOutput > 0.1 ? 'ONLINE' : 'STANDBY',
+      status: output > 0.1 ? 'ONLINE' : 'STANDBY',
       type: plant.type
     });
   });
@@ -759,12 +763,15 @@ viewer.clock.onTick.addEventListener((clock) => {
   gridState.totalRevenue += revenueTick;
 
   // Metrics
-  if (window.optimizationMode !== 'off' && lastBackendDistribution) {
-    // Use backend totals for UI + particle flow so they match what the panel displays.
-    const total = Object.values(lastBackendDistribution).reduce((a, b) => a + b, 0);
-    const renewable = (lastBackendDistribution.solar || 0) + (lastBackendDistribution.wind || 0) + (lastBackendDistribution.hydro || 0);
+  if (lastBackendBaskets) {
+    const total = Object.values(lastBackendBaskets).reduce((a, b) => a + b, 0);
+    const clean = (lastBackendBaskets.solar || 0)
+      + (lastBackendBaskets.wind || 0)
+      + (lastBackendBaskets.hydro || 0)
+      + (lastBackendBaskets.misc_renew || 0)
+      + (lastBackendBaskets.nuclear || 0);
     gridState.totalGen = Math.round(total);
-    gridState.renewablePct = Math.round((renewable / total) * 100) || 0;
+    gridState.renewablePct = Math.round((clean / total) * 100) || 0;
   } else {
     gridState.totalGen = Math.round(currentTotalGen);
     gridState.renewablePct = Math.round((currentRenewableGen / currentTotalGen) * 100) || 0;
@@ -782,13 +789,12 @@ viewer.clock.onTick.addEventListener((clock) => {
   const currentSimTime = viewer.clock.currentTime.secondsOfDay;
   if (!window.lastOptimizationTime || Math.abs(currentSimTime - window.lastOptimizationTime) > 600) {
     window.lastOptimizationTime = currentSimTime;
-    fetchOptimization(gridState.totalDemand);
+    fetchOptimization();
   }
 
-  // Keep the left panel values live even in Physics mode.
-  if (window.optimizationMode === 'off') {
-    updateMLUI(typeTotals);
-  }
+  // Keep the left panel values live.
+  if (lastBackendBaskets) updateMLUI(lastBackendBaskets);
+  else updateMLUI(typeTotals);
 });
 
 // --- ML UI Logic ---
@@ -800,26 +806,21 @@ window.setOptimizationMode = function (mode) {
   // Update UI buttons
   const buttons = document.querySelectorAll('.strategy-btn');
   buttons.forEach(btn => {
-    if (btn.textContent.toLowerCase().includes(mode === 'impact' ? 'eco' : mode)) {
-      btn.classList.add('active');
-    } else if (mode === 'off' && btn.textContent === 'Physics') {
-      btn.classList.add('active');
-    } else {
-      btn.classList.remove('active');
-    }
+    const m = btn.dataset.mode;
+    if (m && m === mode) btn.classList.add('active');
+    else btn.classList.remove('active');
   });
 
   // Update Indicator
   const indicator = document.getElementById('mlLiveIndicator');
   if (mode === 'off') {
     indicator.classList.remove('active');
-    window.optimizationTargets = null; // Clear targets
-    lastBackendDistribution = null;
   } else {
     indicator.classList.add('active');
-    // Trigger immediate fetch
-    fetchOptimization(gridState.totalDemand);
   }
+
+  // Backend drives values in all modes; mode only changes weights.
+  fetchOptimization();
 };
 
 // Make ML Panel Draggable
@@ -832,7 +833,7 @@ function format2(n) {
 function updateSimClockDisplay(julianTime) {
   const date = Cesium.JulianDate.toDate(julianTime);
   const parts = new Intl.DateTimeFormat('en-GB', {
-    timeZone: 'Asia/Kolkata',
+    timeZone: 'UTC',
     hour: '2-digit',
     minute: '2-digit',
     hour12: false,
@@ -843,53 +844,57 @@ function updateSimClockDisplay(julianTime) {
   if (el) el.textContent = `${hh}:${mm}`;
 }
 
-// CleanedData is historical; we intentionally ignore date.
-// We send a fixed IST date with the current simulated IST hour/minute.
-function buildFixedIstSimulationIso() {
+function buildSimulationIso() {
   const date = Cesium.JulianDate.toDate(viewer.clock.currentTime);
-  const parts = new Intl.DateTimeFormat('en-GB', {
-    timeZone: 'Asia/Kolkata',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  }).formatToParts(date);
-  const hh = parts.find(p => p.type === 'hour')?.value ?? '00';
-  const mm = parts.find(p => p.type === 'minute')?.value ?? '00';
-  return `2023-07-01T${hh}:${mm}:00+05:30`;
+  return date.toISOString();
 }
 
 // --- API Integration ---
-async function fetchOptimization(currentLoad) {
-  if (window.optimizationMode === 'off') return;
-
+async function fetchOptimization() {
   try {
-    const simulationTimeIso = buildFixedIstSimulationIso();
+    const simulationTimeIso = buildSimulationIso();
+    const optimizationType = window.optimizationMode === 'off' ? 'balanced' : window.optimizationMode;
     const response = await fetch('http://localhost:8000/optimize', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        current_load: currentLoad,
         simulation_time: simulationTimeIso,
-        optimization_type: window.optimizationMode
+        optimization_type: optimizationType
       }),
     });
 
     if (response.ok) {
       const data = await response.json();
       lastBackendDistribution = data.distribution;
-      applyOptimization(data.distribution);
-      updateMLUI(data.distribution);
+      lastBackendBaskets = data.baskets || null;
+      lastBackendRequiredLoad = data.required_load;
+      if (data.distribution) applyOptimization(data.distribution);
+      if (data.baskets) updateMLUI(data.baskets);
+      else updateMLUI(data.distribution);
     }
   } catch (error) {
     console.error('Optimization fetch failed:', error);
   }
 }
 
+function getUtcHourMinute(julianTime) {
+  const date = Cesium.JulianDate.toDate(julianTime);
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'UTC',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(date);
+  const hh = Number(parts.find(p => p.type === 'hour')?.value ?? '0');
+  const mm = Number(parts.find(p => p.type === 'minute')?.value ?? '0');
+  return { hh, mm, hourFloat: hh + (mm / 60) };
+}
+
 function updateMLUI(distribution) {
   // Update bars in the ML panel
-  const maxCap = 2500; // Scale for bars
+  const maxCap = Math.max(1, gridState.totalDemand || 1);
 
   const updateBar = (type, val) => {
     const bar = document.getElementById(`ml${type}Bar`);
@@ -906,6 +911,23 @@ function updateMLUI(distribution) {
   updateBar('Hydro', distribution.hydro || 0);
   updateBar('Nuclear', distribution.nuclear || 0);
   updateBar('Coal', distribution.coal || 0);
+
+  // Extra baskets (explicit)
+  const miscRenew = distribution.misc_renew || 0;
+  const miscNonrenew = distribution.misc_nonrenew || 0;
+
+  const setExtra = (idPrefix, val) => {
+    const bar = document.getElementById(`${idPrefix}Bar`);
+    const label = document.getElementById(`${idPrefix}Val`);
+    if (bar && label) {
+      const pct = Math.min(100, (val / maxCap) * 100);
+      bar.style.width = `${pct}%`;
+      label.textContent = `${Math.round(val)} MW`;
+    }
+  };
+
+  setExtra('mlMiscRenew', miscRenew);
+  setExtra('mlMiscNonrenew', miscNonrenew);
 }
 
 function applyOptimization(distribution) {

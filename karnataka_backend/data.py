@@ -5,15 +5,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Dict, Tuple
 
-from zoneinfo import ZoneInfo
-
 import pandas as pd
 
 
 FEATURE_COLUMNS = ["hour", "day", "month", "day_of_week"]
-
-
-_IST = ZoneInfo("Asia/Kolkata")
 
 
 BASKET_FORMULAS = {
@@ -64,10 +59,9 @@ def load_and_transform(paths: DatasetPaths) -> Tuple[pd.DataFrame, Dict[str, flo
     for basket, cols in BASKET_FORMULAS.items():
         _ensure_columns(df, cols)
 
-    # Parse time and convert to Karnataka local time for feature extraction.
-    # We intentionally treat the Spain proxy dataset as a shape/template and learn
-    # patterns in *local clock time* so day/night effects (especially solar) line up.
-    df["time"] = pd.to_datetime(df["time"], utc=True).dt.tz_convert("Asia/Kolkata")
+    # Parse time in the dataset's own timezone (+00:00 in CleanedData.csv).
+    # We keep UTC to avoid injecting Karnataka/IST assumptions.
+    df["time"] = pd.to_datetime(df["time"], utc=True)
 
     # Time features
     df["hour"] = df["time"].dt.hour
@@ -96,13 +90,12 @@ def load_and_transform(paths: DatasetPaths) -> Tuple[pd.DataFrame, Dict[str, flo
 def features_from_sim_time(sim_time: datetime) -> pd.DataFrame:
     """Convert a simulation datetime into the feature vector used by the models.
 
-    Cesium times are commonly passed as UTC (trailing 'Z'). We convert to IST
-    before extracting hour/day/month/dow so solar/day-night behavior matches
-    Karnataka local time.
+    Cesium times are commonly passed as UTC (trailing 'Z'). We keep UTC so the
+    model follows the dataset's trends without timezone remapping.
     """
     if sim_time.tzinfo is None:
         sim_time = sim_time.replace(tzinfo=timezone.utc)
-    local_time = sim_time.astimezone(_IST)
+    local_time = sim_time.astimezone(timezone.utc)
     return pd.DataFrame(
         [[local_time.hour, local_time.day, local_time.month, local_time.weekday()]],
         columns=FEATURE_COLUMNS,

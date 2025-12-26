@@ -20,7 +20,7 @@ app.add_middleware(
 )
 
 class OptimizationRequest(BaseModel):
-    current_load: float
+    current_load: Optional[float] = None
     # Prefer simulation_time (ISO8601). `hour` is kept for backward compatibility.
     simulation_time: Optional[str] = None
     hour: float = 12.0  # Default to noon
@@ -28,6 +28,8 @@ class OptimizationRequest(BaseModel):
 
 class OptimizationResponse(BaseModel):
     distribution: dict
+    baskets: dict
+    required_load: float
     total_generated: float
 
 @app.get("/")
@@ -42,6 +44,8 @@ def optimize_energy(request: OptimizationRequest):
             cost_w, impact_w = 0.8, 0.2
         elif request.optimization_type == "impact":
             cost_w, impact_w = 0.2, 0.8
+        elif request.optimization_type == "balanced":
+            cost_w, impact_w = 0.5, 0.5
         else:
             cost_w, impact_w = 0.5, 0.5
 
@@ -57,11 +61,19 @@ def optimize_energy(request: OptimizationRequest):
             sim_dt = datetime(now.year, now.month, now.day, hh, mm, tzinfo=timezone.utc)
             sim_iso = sim_dt.isoformat()
 
-        resp = run_backend(sim_iso, cost_weight=cost_w, impact_weight=impact_w, current_load_mw=request.current_load)
+        resp = run_backend(
+            sim_iso,
+            cost_weight=cost_w,
+            impact_weight=impact_w,
+            current_load_mw=request.current_load,
+        )
         distribution = resp.cesium_distribution_mw
-        total_gen = float(sum(distribution.values()))
+        baskets = resp.allocation_mw
+        total_gen = float(sum(baskets.values()))
         return {
             "distribution": distribution,
+            "baskets": baskets,
+            "required_load": float(resp.required_load_mw),
             "total_generated": total_gen
         }
     except Exception as e:
@@ -73,7 +85,7 @@ def get_forecast():
     # Uses the Karnataka time-feature models; defaults to the simulation start date.
     predictor = Predictor()
 
-    # 2023-07-01 00:00 IST expressed in UTC
+    # Simple 24h profile based on UTC hours.
     base = datetime(2023, 6, 30, 18, 30, tzinfo=timezone.utc)
     solar = []
     wind = []

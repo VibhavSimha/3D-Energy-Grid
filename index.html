@@ -5,7 +5,7 @@
   <meta charset="UTF-8" />
   <link rel="icon" type="image/svg+xml" href="/vite.svg" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Bengaluru Energy Grid - 3D Globe Visualization</title>
+  <title>Karnataka Energy Grid - 3D Globe Visualization</title>
   <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
 
@@ -738,7 +738,7 @@
 
   <header>
     <div class="header-content">
-      <h1><span class="icon">⚡</span> Bengaluru Energy Grid</h1>
+      <h1><span class="icon">⚡</span> Karnataka Energy Grid</h1>
       <p class="subtitle">Real-time 3D Power Infrastructure Visualization</p>
     </div>
   </header>
@@ -762,15 +762,22 @@
     <div class="ml-header">
       <h3>
         <span class="live-indicator" id="mlLiveIndicator"></span>
-        ML Optimization
+        Karnataka Grid
       </h3>
       <div id="clockDisplay">00:00</div>
     </div>
 
+    <div class="chart-row" style="padding: 0 16px 6px 16px;">
+      <div class="chart-label-row">
+        <span>Total Load</span>
+        <span id="mlTotalLoadVal">0 MW</span>
+      </div>
+    </div>
+
     <div class="strategy-toggles">
-      <button class="strategy-btn active" onclick="setOptimizationMode('off')">Physics</button>
-      <button class="strategy-btn" onclick="setOptimizationMode('cost')">Cost Opt</button>
-      <button class="strategy-btn" onclick="setOptimizationMode('impact')">Eco Mode</button>
+      <button class="strategy-btn active" data-mode="off" onclick="setOptimizationMode('off')">Simulation</button>
+      <button class="strategy-btn" data-mode="cost" onclick="setOptimizationMode('cost')">Cost Opt</button>
+      <button class="strategy-btn" data-mode="impact" onclick="setOptimizationMode('impact')">Eco Mode</button>
     </div>
 
     <div class="ml-chart-container">
@@ -821,6 +828,26 @@
         </div>
         <div class="chart-bar-bg">
           <div id="mlCoalBar" class="chart-bar-fill" style="width: 0%; background: #546e7a;"></div>
+        </div>
+      </div>
+
+      <div class="chart-row">
+        <div class="chart-label-row">
+          <span>Misc (Renew)</span>
+          <span id="mlMiscRenewVal">0 MW</span>
+        </div>
+        <div class="chart-bar-bg">
+          <div id="mlMiscRenewBar" class="chart-bar-fill" style="width: 0%; background: #2196f3;"></div>
+        </div>
+      </div>
+
+      <div class="chart-row">
+        <div class="chart-label-row">
+          <span>Misc (Non-Renew)</span>
+          <span id="mlMiscNonrenewVal">0 MW</span>
+        </div>
+        <div class="chart-bar-bg">
+          <div id="mlMiscNonrenewBar" class="chart-bar-fill" style="width: 0%; background: #546e7a;"></div>
         </div>
       </div>
     </div>
