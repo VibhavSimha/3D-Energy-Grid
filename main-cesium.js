@@ -474,7 +474,7 @@ function buildPlantListUI() {
         if (entity) {
           viewer.selectedEntity = entity; // Select the entity
           showPlantDetail(plant.name); // Show custom dashboard
-          
+
           // Fix: Use flyTo on the entity to center it properly and maintain selection
           viewer.flyTo(entity, {
             duration: 1.5,
@@ -642,18 +642,16 @@ viewer.clock.onTick.addEventListener((clock) => {
 
   const utc = getUtcHourMinute(clock.currentTime);
   const hour = utc.hourFloat; // UTC hour (0.0 to 24.0)
+  // Karnataka is UTC+5:30.
+  const localHour = (hour + 5.5) % 24;
 
-  // 1. Demand: prefer backend predicted/required load (real data).
-  // Fallback to the legacy synthetic curve only until the first backend response arrives.
-  if (typeof lastBackendRequiredLoad === 'number' && isFinite(lastBackendRequiredLoad)) {
-    gridState.totalDemand = Math.round(lastBackendRequiredLoad);
-  } else {
-    const baseLoad = 600;
-    const morningPeak = 350 * Math.exp(-Math.pow(hour - 9.5, 2) / 3);
-    const eveningPeak = 450 * Math.exp(-Math.pow(hour - 19.5, 2) / 4);
-    const industrialNoise = (Math.sin(hour * 10) + Math.cos(hour * 23)) * 15;
-    gridState.totalDemand = Math.round(baseLoad + morningPeak + eveningPeak + industrialNoise);
-  }
+  // 1. Demand: Use synthetic curve for Bengaluru (approx 600-1000 MW)
+  // We prefer this over the backend's "Spain" load (28GW) to keep the simulation at city-scale.
+  const baseLoad = 600;
+  const morningPeak = 350 * Math.exp(-Math.pow(localHour - 9.5, 2) / 3);
+  const eveningPeak = 450 * Math.exp(-Math.pow(localHour - 19.5, 2) / 4);
+  const industrialNoise = (Math.sin(localHour * 10) + Math.cos(localHour * 23)) * 15;
+  gridState.totalDemand = Math.round(baseLoad + morningPeak + eveningPeak + industrialNoise);
 
   const loadEl = document.getElementById('mlTotalLoadVal');
   if (loadEl) loadEl.textContent = `${gridState.totalDemand.toLocaleString()} MW`;
@@ -677,17 +675,17 @@ viewer.clock.onTick.addEventListener((clock) => {
     let emissionFactor = 0; // kgCO2/MWh
 
     if (plant.type === 'solar') {
-      // Solar: Bell curve from 6am to 6pm
-      if (hour > 6 && hour < 18) {
-        const sunIntensity = Math.max(0, Math.sin(((hour - 6) / 12) * Math.PI));
+      // Solar: Bell curve from 6am to 6pm (IST)
+      if (localHour > 6 && localHour < 18) {
+        const sunIntensity = Math.max(0, Math.sin(((localHour - 6) / 12) * Math.PI));
         currentOutput = maxCap * sunIntensity;
-        const cloudCover = Math.sin(hour * 5) * 0.1 + 0.9;
+        const cloudCover = Math.sin(localHour * 5) * 0.1 + 0.9;
         currentOutput *= cloudCover;
       }
       emissionFactor = 0;
     } else if (plant.type === 'wind') {
-      const windBase = 0.4 + 0.3 * Math.sin((hour - 14) / 24 * Math.PI * 2);
-      const gust = (Math.sin(hour * 45) * 0.2);
+      const windBase = 0.4 + 0.3 * Math.sin((localHour - 14) / 24 * Math.PI * 2);
+      const gust = (Math.sin(localHour * 45) * 0.2);
       currentOutput = maxCap * Math.max(0, windBase + gust);
       emissionFactor = 0;
     } else if (plant.type === 'hydro') {
@@ -792,9 +790,15 @@ viewer.clock.onTick.addEventListener((clock) => {
     fetchOptimization();
   }
 
-  // Keep the left panel values live.
-  if (lastBackendBaskets) updateMLUI(lastBackendBaskets);
-  else updateMLUI(typeTotals);
+  // Keep the left panel values live and strictly synchronized with the plants.
+  // We use the aggregated 'typeTotals' from the physics loop above.
+  // For 'misc' categories (which have no 3D plants), we use the last backend value.
+  const liveDisplay = { ...typeTotals };
+  if (lastBackendBaskets) {
+    liveDisplay.misc_renew = lastBackendBaskets.misc_renew || 0;
+    liveDisplay.misc_nonrenew = lastBackendBaskets.misc_nonrenew || 0;
+  }
+  updateMLUI(liveDisplay);
 });
 
 // --- ML UI Logic ---
@@ -802,6 +806,7 @@ window.optimizationMode = 'off'; // 'off', 'cost', 'impact'
 
 window.setOptimizationMode = function (mode) {
   window.optimizationMode = mode;
+  console.log('[Mode Change] Switching to:', mode);
 
   // Update UI buttons
   const buttons = document.querySelectorAll('.strategy-btn');
@@ -819,6 +824,18 @@ window.setOptimizationMode = function (mode) {
     indicator.classList.add('active');
   }
 
+  // Update Mode Description
+  const descEl = document.getElementById('modeDescription');
+  if (descEl) {
+    if (mode === 'off') {
+      descEl.innerHTML = '<strong>Simulation:</strong> Raw model predictions based on time-of-day.';
+    } else if (mode === 'cost') {
+      descEl.innerHTML = '<strong>Cost Optimization:</strong> Prioritizes cheaper sources (Solar, Wind). <span style="color:#4caf50;">↑ Renewables</span>, <span style="color:#ff5252;">↓ Coal</span>';
+    } else if (mode === 'impact') {
+      descEl.innerHTML = '<strong>Eco Mode:</strong> Maximizes green energy. <span style="color:#4caf50;">↑↑ Solar/Wind</span>, <span style="color:#ff5252;">↓↓ Fossil</span>';
+    }
+  }
+
   // Backend drives values in all modes; mode only changes weights.
   fetchOptimization();
 };
@@ -832,16 +849,17 @@ function format2(n) {
 
 function updateSimClockDisplay(julianTime) {
   const date = Cesium.JulianDate.toDate(julianTime);
-  const parts = new Intl.DateTimeFormat('en-GB', {
-    timeZone: 'UTC',
-    hour: '2-digit',
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Kolkata',
+    hour: 'numeric',
     minute: '2-digit',
-    hour12: false,
+    hour12: true,
   }).formatToParts(date);
-  const hh = parts.find(p => p.type === 'hour')?.value ?? '00';
+  const hh = parts.find(p => p.type === 'hour')?.value ?? '12';
   const mm = parts.find(p => p.type === 'minute')?.value ?? '00';
+  const amp = parts.find(p => p.type === 'dayPeriod')?.value ?? 'AM';
   const el = document.getElementById('clockDisplay');
-  if (el) el.textContent = `${hh}:${mm}`;
+  if (el) el.textContent = `${hh}:${mm} ${amp}`;
 }
 
 function buildSimulationIso() {
@@ -861,7 +879,8 @@ async function fetchOptimization() {
       },
       body: JSON.stringify({
         simulation_time: simulationTimeIso,
-        optimization_type: optimizationType
+        optimization_type: optimizationType,
+        current_load: gridState.totalDemand // Send current city demand to scale the backend response
       }),
     });
 
@@ -928,6 +947,20 @@ function updateMLUI(distribution) {
 
   setExtra('mlMiscRenew', miscRenew);
   setExtra('mlMiscNonrenew', miscNonrenew);
+
+  // Calculate and display Total Generation (sum of all sources)
+  const totalGen = (distribution.solar || 0)
+    + (distribution.wind || 0)
+    + (distribution.hydro || 0)
+    + (distribution.nuclear || 0)
+    + (distribution.coal || 0)
+    + miscRenew
+    + miscNonrenew;
+
+  const totalGenEl = document.getElementById('mlTotalGenVal');
+  if (totalGenEl) {
+    totalGenEl.textContent = `${Math.round(totalGen)} MW`;
+  }
 }
 
 function applyOptimization(distribution) {

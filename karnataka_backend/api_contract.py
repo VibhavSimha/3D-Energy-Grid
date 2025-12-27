@@ -44,10 +44,19 @@ def _merge_to_cesium_types(allocation_mw: Dict[str, float]) -> Dict[str, float]:
     }
 
 
-def _spread_load(required_load_mw: float, predicted_mw: Dict[str, float]) -> Dict[str, float]:
+def _spread_load(
+    required_load_mw: float,
+    predicted_mw: Dict[str, float],
+    cost_weight: float = 0.5,
+    impact_weight: float = 0.5,
+) -> Dict[str, float]:
     """Scale predicted basket MW values to sum exactly to required_load_mw.
 
-    This keeps the load unchanged and preserves the model's relative basket mix.
+    Prioritization:
+      - cost_weight high: Prefer cheaper sources (renewables first, then nuclear, then fossil)
+      - impact_weight high: Prefer green sources (renewables >> nuclear >> fossil)
+    
+    We apply a multiplier to each bucket based on weights to bias the distribution.
     """
     if required_load_mw < 0:
         raise ValueError("required_load_mw must be >= 0")
@@ -58,12 +67,35 @@ def _spread_load(required_load_mw: float, predicted_mw: Dict[str, float]) -> Dic
     if total <= 0.0:
         if not cleaned:
             return {}
-        # Degenerate fallback: split evenly if the model returns all zeros.
         per = float(required_load_mw) / float(len(cleaned)) if len(cleaned) else 0.0
         return {k: per for k in cleaned.keys()}
 
-    scale = float(required_load_mw) / total
-    return {k: v * scale for k, v in cleaned.items()}
+    # Apply bias multipliers based on mode.
+    # Higher multiplier = more allocation.
+    # Cost Mode: Boost renewables significantly (free fuel), reduce Coal heavily.
+    # Eco Mode: Boost renewables massively, CRUSH Fossil.
+
+    # Base Multipliers (Aggressive)
+    bias = {
+        "solar": 1.0 + 0.5 * cost_weight + 2.0 * impact_weight,
+        "wind": 1.0 + 0.5 * cost_weight + 2.0 * impact_weight,
+        "hydro": 1.0 + 0.3 * cost_weight + 1.0 * impact_weight,
+        "nuclear": 1.0 + 0.1 * cost_weight + 0.5 * impact_weight,
+        "coal": max(0.05, 1.0 - 0.6 * cost_weight - 0.9 * impact_weight), # Almost 0 in Eco
+        "misc_renew": 1.0 + 0.3 * cost_weight + 1.2 * impact_weight,
+        "misc_nonrenew": max(0.05, 1.0 - 0.5 * cost_weight - 0.9 * impact_weight),
+    }
+
+    # Apply bias and re-scale
+    biased = {k: max(0.0, v * bias.get(k, 1.0)) for k, v in cleaned.items()}
+    biased_total = float(sum(biased.values()))
+
+    if biased_total <= 0.0:
+        per = float(required_load_mw) / float(len(cleaned)) if len(cleaned) else 0.0
+        return {k: per for k in cleaned.keys()}
+
+    scale = float(required_load_mw) / biased_total
+    return {k: v * scale for k, v in biased.items()}
 
 
 def run_backend(
@@ -93,7 +125,17 @@ def run_backend(
 
     required_load_mw = float(current_load_mw) if current_load_mw is not None else float(preds.load_mw)
 
-    allocation = _spread_load(required_load_mw, preds.mw_by_bucket)
+    # HARD CONSTRAINT: Solar must be 0 at night in Karnataka (~6pm to 6am).
+    # Predictor might have noise.
+    # Convert sim_time to IST to check hour.
+    from datetime import timedelta, timezone
+    ist = timezone(timedelta(hours=5, minutes=30))
+    local_hour = sim_time.astimezone(ist).hour
+    
+    if local_hour >= 19 or local_hour < 6:
+        preds.mw_by_bucket["solar"] = 0.0
+
+    allocation = _spread_load(required_load_mw, preds.mw_by_bucket, cost_weight, impact_weight)
     cesium_distribution = _merge_to_cesium_types(allocation)
 
     return BackendResponse(

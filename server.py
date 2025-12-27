@@ -3,6 +3,10 @@ from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime, timezone
 from typing import Optional
+import warnings
+
+# Suppress sklearn version warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="sklearn")
 
 from karnataka_backend.api_contract import run_backend
 from karnataka_backend.predict import Predictor

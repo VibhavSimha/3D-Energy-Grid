@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Dict, Tuple
 
 import pandas as pd
@@ -95,7 +95,14 @@ def features_from_sim_time(sim_time: datetime) -> pd.DataFrame:
     """
     if sim_time.tzinfo is None:
         sim_time = sim_time.replace(tzinfo=timezone.utc)
-    local_time = sim_time.astimezone(timezone.utc)
+    
+    # Karnataka is IST (UTC+5:30)
+    # We want "12:00" in the model when it is "12:00" in Karnataka.
+    # The model was trained on data where "12:00" means Noon.
+    # So we must shift the incoming UTC time to IST.
+    ist_offset = timezone(timedelta(hours=5, minutes=30))
+    local_time = sim_time.astimezone(ist_offset)
+
     return pd.DataFrame(
         [[local_time.hour, local_time.day, local_time.month, local_time.weekday()]],
         columns=FEATURE_COLUMNS,
