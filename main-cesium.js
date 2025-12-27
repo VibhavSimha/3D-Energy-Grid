@@ -96,6 +96,11 @@ const gridState = {
 const plantRealtimeData = new Map(); // Store real-time data for each plant
 let selectedPlantName = null; // Track currently selected plant
 
+// Backend-driven totals (when optimization is enabled)
+let lastBackendDistribution = null; // {solar, wind, hydro, nuclear, coal}
+let lastBackendBaskets = null; // full basket allocations: solar/wind/hydro/nuclear/coal/misc_renew/misc_nonrenew
+let lastBackendRequiredLoad = null;
+
 // Add plant entities to the viewer
 bengaluruPlants.forEach(plant => {
   // Apply position offsets for manual adjustment
@@ -289,6 +294,16 @@ function drawPowerLines() {
 const particles = [];
 let MAX_PARTICLES = 0;
 const WATTS_PER_PARTICLE = 40; // 1 dot = 40 MW
+
+// Limit Cesium animation speed so the UI stays readable.
+const MAX_ABS_CLOCK_MULTIPLIER = 7200;
+
+function clampClockMultiplier() {
+  const m = viewer.clock.multiplier;
+  if (Math.abs(m) > MAX_ABS_CLOCK_MULTIPLIER) {
+    viewer.clock.multiplier = Math.sign(m) * MAX_ABS_CLOCK_MULTIPLIER;
+  }
+}
 
 function initEnergyParticles() {
   // Clear existing
@@ -582,7 +597,12 @@ function updatePlantDetailPanel(plantName) {
   const data = plantRealtimeData.get(plantName);
   if (!data) return;
 
+  const plant = bengaluruPlants.find(p => p.name === plantName);
+  const capText = plant?.capacity || `${data.maxCapacity} MW`;
+
   document.getElementById('detailName').textContent = plantName;
+  const capEl = document.getElementById('detailCapacity');
+  if (capEl) capEl.textContent = capText;
   document.getElementById('detailType').textContent = data.type.toUpperCase();
 
   const statusElem = document.getElementById('detailStatus');
@@ -595,8 +615,6 @@ function updatePlantDetailPanel(plantName) {
   const pct = Math.min(100, (data.output / data.maxCapacity) * 100);
   document.getElementById('detailOutputBar').style.width = `${pct}%`;
 
-  document.getElementById('detailEfficiency').textContent = `${data.efficiency.toFixed(1)}%`;
-  document.getElementById('detailTemp').textContent = `${data.temperature.toFixed(1)}°C`;
 }
 
 // Close button handler
@@ -617,16 +635,28 @@ function parseCapacity(capStr) {
 
 // Update Simulation Loop (runs every frame)
 viewer.clock.onTick.addEventListener((clock) => {
-  const time = Cesium.JulianDate.toGregorianDate(clock.currentTime);
-  const hour = time.hour + time.minute / 60; // 0.0 to 24.0
+  clampClockMultiplier();
 
-  // 1. Calculate Demand Curve (Advanced Model)
-  // Base load + Morning/Evening Peaks + Industrial Noise
-  const baseLoad = 600;
-  const morningPeak = 350 * Math.exp(-Math.pow(hour - 9.5, 2) / 3); // Peak at 9:30 AM
-  const eveningPeak = 450 * Math.exp(-Math.pow(hour - 19.5, 2) / 4); // Peak at 7:30 PM
-  const industrialNoise = (Math.sin(hour * 10) + Math.cos(hour * 23)) * 15; // High freq noise
-  gridState.totalDemand = Math.round(baseLoad + morningPeak + eveningPeak + industrialNoise);
+  // Update the ML panel clock from Cesium simulation time (UTC display).
+  updateSimClockDisplay(clock.currentTime);
+
+  const utc = getUtcHourMinute(clock.currentTime);
+  const hour = utc.hourFloat; // UTC hour (0.0 to 24.0)
+
+  // 1. Demand: prefer backend predicted/required load (real data).
+  // Fallback to the legacy synthetic curve only until the first backend response arrives.
+  if (typeof lastBackendRequiredLoad === 'number' && isFinite(lastBackendRequiredLoad)) {
+    gridState.totalDemand = Math.round(lastBackendRequiredLoad);
+  } else {
+    const baseLoad = 600;
+    const morningPeak = 350 * Math.exp(-Math.pow(hour - 9.5, 2) / 3);
+    const eveningPeak = 450 * Math.exp(-Math.pow(hour - 19.5, 2) / 4);
+    const industrialNoise = (Math.sin(hour * 10) + Math.cos(hour * 23)) * 15;
+    gridState.totalDemand = Math.round(baseLoad + morningPeak + eveningPeak + industrialNoise);
+  }
+
+  const loadEl = document.getElementById('mlTotalLoadVal');
+  if (loadEl) loadEl.textContent = `${gridState.totalDemand.toLocaleString()} MW`;
 
   // Update Particles (Visuals)
   // We want smooth animation, so we use system clock or just a fixed small step
@@ -638,7 +668,10 @@ viewer.clock.onTick.addEventListener((clock) => {
   let currentRenewableGen = 0;
   let currentCarbonEmissions = 0; // kgCO2/h
 
-  bengaluruPlants.forEach(plant => {
+  const typeTotals = { solar: 0, wind: 0, hydro: 0, nuclear: 0, coal: 0 };
+
+  // First pass: compute raw plant outputs.
+  const plantOutputs = bengaluruPlants.map((plant) => {
     const maxCap = parseCapacity(plant.capacity);
     let currentOutput = 0;
     let emissionFactor = 0; // kgCO2/MWh
@@ -648,69 +681,51 @@ viewer.clock.onTick.addEventListener((clock) => {
       if (hour > 6 && hour < 18) {
         const sunIntensity = Math.max(0, Math.sin(((hour - 6) / 12) * Math.PI));
         currentOutput = maxCap * sunIntensity;
-        // Cloud cover simulation (Perlin-like noise)
         const cloudCover = Math.sin(hour * 5) * 0.1 + 0.9;
         currentOutput *= cloudCover;
       }
       emissionFactor = 0;
     } else if (plant.type === 'wind') {
-      // Wind: Diurnal pattern + Gusts
-      const windBase = 0.4 + 0.3 * Math.sin((hour - 14) / 24 * Math.PI * 2); // Higher in evening
+      const windBase = 0.4 + 0.3 * Math.sin((hour - 14) / 24 * Math.PI * 2);
       const gust = (Math.sin(hour * 45) * 0.2);
       currentOutput = maxCap * Math.max(0, windBase + gust);
       emissionFactor = 0;
     } else if (plant.type === 'hydro') {
-      // Hydro: Dispatchable - ramps up to meet demand peaks
-      const demandFactor = (gridState.totalDemand - 600) / 500; // Normalized peak demand
+      const demandFactor = (gridState.totalDemand - 600) / 500;
       currentOutput = maxCap * (0.4 + Math.max(0, demandFactor * 0.6));
       emissionFactor = 0;
     } else if (plant.type === 'nuclear') {
-      // Nuclear: Base load, very stable
       currentOutput = maxCap * 0.98;
-      emissionFactor = 12; // Very low but non-zero lifecycle
+      emissionFactor = 12;
     } else if (plant.type === 'coal') {
-      // Coal: Dispatchable, high emissions
       const demandFactor = (gridState.totalDemand - 600) / 500;
       currentOutput = maxCap * (0.6 + Math.max(0, demandFactor * 0.4));
       emissionFactor = 820;
     }
 
-    // --- OPTIMIZATION OVERRIDE ---
+    // Optimization mode overrides physics.
     if (window.optimizationTargets && window.optimizationTargets.has(plant.name)) {
       const target = window.optimizationTargets.get(plant.name);
-      // Smoothly interpolate towards target (simple P-controller)
-      // If it's renewable (solar/wind), we can't exceed physics limit usually, 
-      // but for this simulation, let's assume storage/curtailment allows matching target 
-      // (or we clamp to physics max if we want to be strict, but user wants ML control).
-      // Let's blend: 
-      // For dispatchable (hydro/nuclear), we follow target.
-      // For variable (solar/wind), we curtail if target < physics, but can't exceed physics.
-
-      if (plant.type === 'solar' || plant.type === 'wind') {
-        currentOutput = Math.min(currentOutput, target);
-      } else {
-        // Hydro/Nuclear/Fossil follow command
-        // Smooth transition
-        const diff = target - currentOutput;
-        currentOutput += diff * 0.1; // 10% per tick approach
-      }
-    }
-    // -----------------------------
-
-    currentTotalGen += currentOutput;
-    currentCarbonEmissions += currentOutput * emissionFactor;
-
-    if (['solar', 'wind', 'hydro'].includes(plant.type)) {
-      currentRenewableGen += currentOutput;
+      const diff = target - currentOutput;
+      currentOutput += diff * 0.15;
     }
 
-    // Store real-time data for this plant
+    currentOutput = Math.max(0, Math.min(currentOutput, maxCap));
+    return { plant, maxCap, output: currentOutput, emissionFactor };
+  });
+
+  // Second pass: aggregate + store per-plant realtime.
+  plantOutputs.forEach(({ plant, maxCap, output, emissionFactor }) => {
+    currentTotalGen += output;
+    currentCarbonEmissions += output * emissionFactor;
+    if (['solar', 'wind', 'hydro', 'nuclear'].includes(plant.type)) {
+      currentRenewableGen += output;
+    }
+    typeTotals[plant.type] += output;
     plantRealtimeData.set(plant.name, {
-      output: currentOutput,
+      output: output,
       maxCapacity: maxCap,
-      efficiency: (currentOutput / maxCap) * 100,
-      temperature: 25 + (currentOutput / maxCap) * 40 + (Math.random() * 2), // Simulated temp
-      status: currentOutput > 0.1 ? 'ONLINE' : 'STANDBY',
+      status: output > 0.1 ? 'ONLINE' : 'STANDBY',
       type: plant.type
     });
   });
@@ -748,9 +763,19 @@ viewer.clock.onTick.addEventListener((clock) => {
   gridState.totalRevenue += revenueTick;
 
   // Metrics
-  gridState.totalGen = Math.round(currentTotalGen);
-  gridState.renewablePct = Math.round((currentRenewableGen / currentTotalGen) * 100) || 0;
-  gridState.carbonIntensity = Math.round(currentCarbonEmissions / currentTotalGen); // gCO2/kWh approx
+  if (lastBackendBaskets) {
+    const total = Object.values(lastBackendBaskets).reduce((a, b) => a + b, 0);
+    const clean = (lastBackendBaskets.solar || 0)
+      + (lastBackendBaskets.wind || 0)
+      + (lastBackendBaskets.hydro || 0)
+      + (lastBackendBaskets.misc_renew || 0)
+      + (lastBackendBaskets.nuclear || 0);
+    gridState.totalGen = Math.round(total);
+    gridState.renewablePct = Math.round((clean / total) * 100) || 0;
+  } else {
+    gridState.totalGen = Math.round(currentTotalGen);
+    gridState.renewablePct = Math.round((currentRenewableGen / currentTotalGen) * 100) || 0;
+  }
 
   // 4. Update Dashboard UI
   // updateDashboard(hour);
@@ -764,10 +789,12 @@ viewer.clock.onTick.addEventListener((clock) => {
   const currentSimTime = viewer.clock.currentTime.secondsOfDay;
   if (!window.lastOptimizationTime || Math.abs(currentSimTime - window.lastOptimizationTime) > 600) {
     window.lastOptimizationTime = currentSimTime;
-    // Calculate hour (0-24)
-    const hour = (currentSimTime / 3600) % 24;
-    fetchOptimization(gridState.totalDemand, hour);
+    fetchOptimization();
   }
+
+  // Keep the left panel values live.
+  if (lastBackendBaskets) updateMLUI(lastBackendBaskets);
+  else updateMLUI(typeTotals);
 });
 
 // --- ML UI Logic ---
@@ -779,118 +806,95 @@ window.setOptimizationMode = function (mode) {
   // Update UI buttons
   const buttons = document.querySelectorAll('.strategy-btn');
   buttons.forEach(btn => {
-    if (btn.textContent.toLowerCase().includes(mode === 'impact' ? 'eco' : mode)) {
-      btn.classList.add('active');
-    } else if (mode === 'off' && btn.textContent === 'Physics') {
-      btn.classList.add('active');
-    } else {
-      btn.classList.remove('active');
-    }
+    const m = btn.dataset.mode;
+    if (m && m === mode) btn.classList.add('active');
+    else btn.classList.remove('active');
   });
 
   // Update Indicator
   const indicator = document.getElementById('mlLiveIndicator');
   if (mode === 'off') {
     indicator.classList.remove('active');
-    window.optimizationTargets = null; // Clear targets
   } else {
     indicator.classList.add('active');
-    // Trigger immediate fetch
-    const currentSimTime = viewer.clock.currentTime.secondsOfDay;
-    const hour = (currentSimTime / 3600) % 24;
-    fetchOptimization(gridState.totalDemand, hour);
   }
+
+  // Backend drives values in all modes; mode only changes weights.
+  fetchOptimization();
 };
 
 // Make ML Panel Draggable
 makeElementDraggable('mlControlPanel', '.ml-header');
 
-// --- API Integration ---
-async function fetchOptimization(currentLoad, hour) {
-  if (window.optimizationMode === 'off') return;
+function format2(n) {
+  return String(n).padStart(2, '0');
+}
 
+function updateSimClockDisplay(julianTime) {
+  const date = Cesium.JulianDate.toDate(julianTime);
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'UTC',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(date);
+  const hh = parts.find(p => p.type === 'hour')?.value ?? '00';
+  const mm = parts.find(p => p.type === 'minute')?.value ?? '00';
+  const el = document.getElementById('clockDisplay');
+  if (el) el.textContent = `${hh}:${mm}`;
+}
+
+function buildSimulationIso() {
+  const date = Cesium.JulianDate.toDate(viewer.clock.currentTime);
+  return date.toISOString();
+}
+
+// --- API Integration ---
+async function fetchOptimization() {
   try {
+    const simulationTimeIso = buildSimulationIso();
+    const optimizationType = window.optimizationMode === 'off' ? 'balanced' : window.optimizationMode;
     const response = await fetch('http://localhost:8000/optimize', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        current_load: currentLoad,
-        hour: hour || 12, // Default to noon if undefined
-        optimization_type: window.optimizationMode
+        simulation_time: simulationTimeIso,
+        optimization_type: optimizationType
       }),
     });
 
     if (response.ok) {
       const data = await response.json();
-      applyOptimization(data.distribution);
-      updateMLUI(data.distribution);
+      lastBackendDistribution = data.distribution;
+      lastBackendBaskets = data.baskets || null;
+      lastBackendRequiredLoad = data.required_load;
+      if (data.distribution) applyOptimization(data.distribution);
+      if (data.baskets) updateMLUI(data.baskets);
+      else updateMLUI(data.distribution);
     }
   } catch (error) {
     console.error('Optimization fetch failed:', error);
   }
 }
 
-// --- Chart.js Integration ---
-let mlChart;
-async function initChart() {
-  const ctx = document.getElementById('mlChart').getContext('2d');
-
-  // Fetch forecast data first
-  let forecastData = { solar: [], wind: [] };
-  try {
-    const res = await fetch('http://localhost:8000/forecast');
-    if (res.ok) forecastData = await res.json();
-  } catch (e) { console.error("Forecast fetch failed", e); }
-
-  mlChart = new Chart(ctx, {
-    type: 'line',
-    data: {
-      labels: Array.from({ length: 24 }, (_, i) => i), // 0-23 hours
-      datasets: [
-        {
-          label: 'Solar Potential',
-          data: forecastData.solar,
-          borderColor: 'rgba(255, 235, 59, 0.5)',
-          borderDash: [5, 5],
-          borderWidth: 1,
-          pointRadius: 0,
-          fill: false
-        },
-        {
-          label: 'Real-time Gen',
-          data: [], // Will fill as we go? Or just show current point?
-          // Let's show a rolling window or just the current hour's value on top of the profile?
-          // For simplicity, let's just show the profiles for now to visualize the "Day Ahead"
-          // and maybe a dot for current time.
-          borderColor: '#4caf50',
-          borderWidth: 2,
-          pointRadius: 0,
-          fill: true,
-          backgroundColor: 'rgba(76, 175, 80, 0.1)'
-        }
-      ]
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      plugins: { legend: { display: false } },
-      scales: {
-        x: { display: false },
-        y: { display: false, min: 0 }
-      },
-      animation: false
-    }
-  });
+function getUtcHourMinute(julianTime) {
+  const date = Cesium.JulianDate.toDate(julianTime);
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'UTC',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(date);
+  const hh = Number(parts.find(p => p.type === 'hour')?.value ?? '0');
+  const mm = Number(parts.find(p => p.type === 'minute')?.value ?? '0');
+  return { hh, mm, hourFloat: hh + (mm / 60) };
 }
-
-// Initialize chart
-initChart();
 
 function updateMLUI(distribution) {
   // Update bars in the ML panel
-  const maxCap = 2500; // Scale for bars
+  const maxCap = Math.max(1, gridState.totalDemand || 1);
 
   const updateBar = (type, val) => {
     const bar = document.getElementById(`ml${type}Bar`);
@@ -908,47 +912,45 @@ function updateMLUI(distribution) {
   updateBar('Nuclear', distribution.nuclear || 0);
   updateBar('Coal', distribution.coal || 0);
 
-  // Update Metric
-  const metricEl = document.getElementById('mlGainValue');
-  if (window.optimizationMode === 'cost') {
-    metricEl.textContent = "$$$ Saved";
-    metricEl.style.color = '#ffeb3b';
-  } else {
-    metricEl.textContent = "CO2 Reduced";
-    metricEl.style.color = '#4caf50';
-  }
+  // Extra baskets (explicit)
+  const miscRenew = distribution.misc_renew || 0;
+  const miscNonrenew = distribution.misc_nonrenew || 0;
 
-  // Update Chart Current Time Indicator (Vertical Line or Point)
-  // For now, let's just re-render if needed, but Chart.js handles animations.
-  // We could add a dataset for "Current Load" if we tracked history.
+  const setExtra = (idPrefix, val) => {
+    const bar = document.getElementById(`${idPrefix}Bar`);
+    const label = document.getElementById(`${idPrefix}Val`);
+    if (bar && label) {
+      const pct = Math.min(100, (val / maxCap) * 100);
+      bar.style.width = `${pct}%`;
+      label.textContent = `${Math.round(val)} MW`;
+    }
+  };
+
+  setExtra('mlMiscRenew', miscRenew);
+  setExtra('mlMiscNonrenew', miscNonrenew);
 }
 
 function applyOptimization(distribution) {
   // distribution is { solar: 1200, wind: 50, ... }
 
-  bengaluruPlants.forEach(plant => {
-    const targetOutput = distribution[plant.type];
-    if (targetOutput !== undefined) {
-      // We need to distribute the type's total target among individual plants of that type
-      // For simplicity, we'll assume one plant per type or split evenly if multiple
-      // But here we have multiple plants per type (e.g. 2 hydro).
+  if (!window.optimizationTargets) window.optimizationTargets = new Map();
 
-      // Count plants of this type
-      const plantsOfType = bengaluruPlants.filter(p => p.type === plant.type);
-      const count = plantsOfType.length;
+  // Split each type total across that type's plants proportional to plant capacity.
+  // This ensures the two coal plants don't get the same MW target, etc.
+  Object.keys(distribution || {}).forEach((type) => {
+    const targetOutput = distribution[type];
+    if (targetOutput === undefined) return;
 
-      // Assign share
-      const plantTarget = targetOutput / count;
+    const plantsOfType = bengaluruPlants.filter(p => p.type === type);
+    if (plantsOfType.length === 0) return;
 
-      // Update the plant's real-time data (smooth transition handled in next tick naturally if we used a target property)
-      // For now, let's just override the output in the map for the next tick to pick up?
-      // Actually, the tick loop calculates output based on physics. 
-      // We should probably override the physics if optimization is active.
+    const totalTypeCap = plantsOfType.reduce((sum, p) => sum + parseCapacity(p.capacity), 0);
+    const denom = totalTypeCap > 0 ? totalTypeCap : plantsOfType.length;
 
-      // Let's store the optimization target in a global map
-      if (!window.optimizationTargets) window.optimizationTargets = new Map();
-      window.optimizationTargets.set(plant.name, plantTarget);
-    }
+    plantsOfType.forEach(p => {
+      const share = totalTypeCap > 0 ? (parseCapacity(p.capacity) / denom) : (1 / denom);
+      window.optimizationTargets.set(p.name, targetOutput * share);
+    });
   });
 }
 
