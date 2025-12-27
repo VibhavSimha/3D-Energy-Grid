@@ -10,17 +10,47 @@ Cesium.Ion.defaultAccessToken = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJqdGkiOi
 // Power plant locations in Karnataka area
 // TO CHANGE POSITIONS: Update the 'lat' (latitude) and 'lon' (longitude) values below.
 const bengaluruPlants = [
-  { name: 'Tuppadahalli Wind Power Station', type: 'wind', capacity: '56 MW', lat: 13.94903334908406, lon: 76.0486864696537, size: 5.0, offsetX: 0, offsetY: 0, offsetZ: 60 },
-  { name: 'Kaiga Nuclear Power Plant', type: 'nuclear', capacity: '880 MW', lat: 14.865460, lon: 74.439071, size: 9.6, offsetX: 0, offsetY: 0, offsetZ: -20 },
+  { name: 'Tuppadahalli Wind Power Station', type: 'wind', capacity: '56 MW', lat: 13.94903334908406, lon: 76.0486864696537, size: 5.0, offsetX: 0, offsetY: 0, offsetZ: 360 },
+  { name: 'Kaiga Nuclear Power Plant', type: 'nuclear', capacity: '880 MW', lat: 14.865460, lon: 74.439071, size: 9.6, offsetX: 0, offsetY: 0, offsetZ: -29 },
   { name: 'Pavagada Solar Park', type: 'solar', capacity: '2050 MW', lat: 14.139977, lon: 77.314803, size: 5.0, offsetX: 0, offsetY: 0, offsetZ: -660 },
-  { name: 'Shivanasamudra Hydro Plant', type: 'hydro', capacity: '42 MW', lat: 12.298628, lon: 77.170727, size: 5.0, offsetX: 0, offsetY: 0, offsetZ: 0 },
-  { name: 'Mahatma Gandhi Hydro Plant', type: 'hydro', capacity: '139 MW', lat: 14.227473, lon: 74.799363, size: 5.0, offsetX: 0, offsetY: 0, offsetZ: 0 },
-  { name: 'Almatti Dam', type: 'hydro', capacity: '290 MW', lat: 16.331017, lon: 75.887133, size: 14.0, offsetX: 0, offsetY: 0, offsetZ: 0 },
-  { name: 'Jindal Jogihalli Wind Plant', type: 'wind', capacity: '20 MW', lat: 14.671766, lon: 76.421704, size: 5.0, offsetX: 0, offsetY: 0, offsetZ: 60 },
-  { name: 'Raichur Solar Park', type: 'solar', capacity: '100 MW', lat: 16.134622, lon: 77.125315, size: 5.0, offsetX: 0, offsetY: 0, offsetZ: -460 },
+  { name: 'Shivanasamudra Hydro Plant', type: 'hydro', capacity: '42 MW', lat: 12.298519628423378, lon: 77.17081283707594, size: 5.0, offsetX: 0, offsetY: 0, offsetZ: 0, headingDeg: 180 },
+  { name: 'Mahatma Gandhi Hydro Plant', type: 'hydro', capacity: '139 MW', lat: 14.227473, lon: 74.799363, size: 5.0, offsetX: 0, offsetY: 0.0005, offsetZ: 0 },
+  { name: 'Almatti Dam', type: 'hydro', capacity: '290 MW', lat: 16.331017, lon: 75.887133, size: 14.0, offsetX: 0, offsetY: 0, offsetZ: 0, headingDeg: 30 },
+  { name: 'Jindal Jogihalli Wind Plant', type: 'wind', capacity: '20 MW', lat: 14.671766, lon: 76.421704, size: 5.0, offsetX: 0, offsetY: 0, offsetZ: 360 },
+  { name: 'Raichur Solar Park', type: 'solar', capacity: '100 MW', lat: 16.134622, lon: 77.125315, size: 5.0, offsetX: 0, offsetY: 0, offsetZ: -650 },
   { name: 'Adani Power Plant', type: 'coal', capacity: '1200 MW', lat: 13.160076, lon: 74.798259, size: 25.0, offsetX: 0, offsetY: 0, offsetZ: 0 },
   { name: 'Bellary Thermal Power Station', type: 'coal', capacity: '1700 MW', lat: 15.196038, lon: 76.717809, size: 25.0, offsetX: 0, offsetY: 0, offsetZ: 0 }
 ];
+
+// --- Optional per-plant model rotation (defaults to no rotation) ---
+// Add any of these fields to a plant object if you want a persistent rotation:
+//   headingDeg (yaw/Z), pitchDeg (Y), rollDeg (X)
+// Or set it at runtime via:
+//   setPlantRotation('Plant Name', { headingDeg: 90, pitchDeg: 0, rollDeg: 0 })
+const plantEntitiesByName = new Map();
+const plantRotationOverridesDegByName = new Map();
+
+function getPlantRotationDeg(plantName, plantObj) {
+  const override = plantRotationOverridesDegByName.get(plantName);
+  if (override) return override;
+  const headingDeg = Number(plantObj?.headingDeg || 0);
+  const pitchDeg = Number(plantObj?.pitchDeg || 0);
+  const rollDeg = Number(plantObj?.rollDeg || 0);
+  return { headingDeg, pitchDeg, rollDeg };
+}
+
+function hasRotation(rot) {
+  return !!rot && (rot.headingDeg !== 0 || rot.pitchDeg !== 0 || rot.rollDeg !== 0);
+}
+
+function rotationQuaternion(position, rotDeg) {
+  const hpr = new Cesium.HeadingPitchRoll(
+    Cesium.Math.toRadians(rotDeg.headingDeg || 0),
+    Cesium.Math.toRadians(rotDeg.pitchDeg || 0),
+    Cesium.Math.toRadians(rotDeg.rollDeg || 0)
+  );
+  return Cesium.Transforms.headingPitchRollQuaternion(position, hpr);
+}
 
 // Initialize Cesium Viewer with 3D terrain (Requires valid Token)
 const viewer = new Cesium.Viewer('cesiumContainer', {
@@ -110,7 +140,7 @@ bengaluruPlants.forEach(plant => {
   const position = Cesium.Cartesian3.fromDegrees(finalLon, finalLat, finalHeight);
   const color = plantColors[plant.type] || Cesium.Color.WHITE;
 
-  viewer.entities.add({
+  const entityOptions = {
     name: `${plant.name} (${plant.capacity})`,
     position: position,
     description: `
@@ -131,8 +161,38 @@ bengaluruPlants.forEach(plant => {
 
       heightReference: Cesium.HeightReference.RELATIVE_TO_GROUND
     }
-  });
+  };
+
+  const rot = getPlantRotationDeg(plant.name, plant);
+  if (hasRotation(rot)) {
+    entityOptions.orientation = rotationQuaternion(position, rot);
+  }
+
+  const entity = viewer.entities.add(entityOptions);
+  plantEntitiesByName.set(plant.name, entity);
 });
+
+// Update an individual model's rotation (degrees) at runtime.
+// Example:
+//   setPlantRotation('Kaiga Nuclear Power Plant', { headingDeg: 90 });
+window.setPlantRotation = function setPlantRotation(plantName, rotDeg = {}) {
+  const entity = plantEntitiesByName.get(plantName);
+  if (!entity) {
+    console.warn('[Rotation] Unknown plant:', plantName);
+    return;
+  }
+
+  const next = {
+    headingDeg: Number(rotDeg.headingDeg ?? 0),
+    pitchDeg: Number(rotDeg.pitchDeg ?? 0),
+    rollDeg: Number(rotDeg.rollDeg ?? 0),
+  };
+  plantRotationOverridesDegByName.set(plantName, next);
+
+  const now = Cesium.JulianDate.now();
+  const pos = entity.position.getValue(now);
+  entity.orientation = rotationQuaternion(pos, next);
+};
 
 // 5. Load Real-World Grid Data (GeoJSON) - Optimized & Chunked
 async function loadRealWorldGrid() {
