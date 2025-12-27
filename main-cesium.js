@@ -633,134 +633,90 @@ function parseCapacity(capStr) {
   return parseFloat(capStr.split(' ')[0]);
 }
 
+
+// ========== REALISTIC KARNATAKA LOAD CURVE ==========
+// Based on typical Indian grid patterns for a city like Bengaluru
+// Reference: Karnataka State Load Dispatch Centre patterns
+//
+// Night Valley (11pm-5am): ~400-500 MW - minimal activity
+// Morning Ramp (5am-9am): ~500-800 MW - waking up, offices starting
+// Day Peak (9am-6pm): ~850-1000 MW - offices, AC, industry at full
+// Evening Peak (6pm-10pm): ~950-1100 MW - residential + commercial overlap
+// Pre-Night (10pm-11pm): ~600-700 MW - winding down
+
+function calculateRealisticLoad(hour) {
+  // Base load that's always present (hospitals, infrastructure, etc.)
+  const baseLoad = 400;
+
+  // Night valley (11pm to 5am) - very low
+  if (hour >= 23 || hour < 5) {
+    const nightFactor = 0.15 + 0.05 * Math.sin(hour * 0.5);
+    return baseLoad + 100 * nightFactor;
+  }
+
+  // Morning ramp (5am to 9am) - steadily rising
+  if (hour >= 5 && hour < 9) {
+    const rampProgress = (hour - 5) / 4; // 0 to 1
+    const morningRise = 350 * rampProgress * rampProgress; // Exponential rise
+    return baseLoad + 100 + morningRise;
+  }
+
+  // Day peak (9am to 6pm) - high, with slight noon dip for lunch
+  if (hour >= 9 && hour < 18) {
+    const dayBase = 500;
+    const acLoad = 150 * Math.sin(((hour - 9) / 9) * Math.PI); // AC peaks at noon
+    const industrialLoad = 250; // Constant industrial
+    const lunchDip = -50 * Math.exp(-Math.pow(hour - 13, 2) / 1.5); // Lunch hour dip
+    return baseLoad + dayBase + acLoad + industrialLoad + lunchDip;
+  }
+
+  // Evening peak (6pm to 10pm) - highest demand (residential + commercial)
+  if (hour >= 18 && hour < 22) {
+    const eveningBase = 550;
+    const residentialSurge = 200 * Math.sin(((hour - 18) / 4) * Math.PI); // Peak around 8pm
+    const lightingLoad = 100; // Lights on
+    const cookingPeak = 80 * Math.exp(-Math.pow(hour - 19.5, 2) / 1); // Dinner time
+    return baseLoad + eveningBase + residentialSurge + lightingLoad + cookingPeak;
+  }
+
+  // Wind down (10pm to 11pm)
+  if (hour >= 22 && hour < 23) {
+    const windDownProgress = (hour - 22) / 1; // 0 to 1
+    const windDown = 600 - 200 * windDownProgress;
+    return baseLoad + windDown;
+  }
+
+  return baseLoad + 400; // Fallback
+}
+
 // Update Simulation Loop (runs every frame)
 viewer.clock.onTick.addEventListener((clock) => {
   clampClockMultiplier();
 
-  // Update the ML panel clock from Cesium simulation time (UTC display).
+  // Update the ML panel clock from Cesium simulation time.
   updateSimClockDisplay(clock.currentTime);
 
   const utc = getUtcHourMinute(clock.currentTime);
-  const hour = utc.hourFloat; // UTC hour (0.0 to 24.0)
-  // Karnataka is UTC+5:30.
-  const localHour = (hour + 5.5) % 24;
+  const localHour = (utc.hourFloat + 5.5) % 24; // Karnataka is UTC+5:30
 
-  // 1. Demand: Use synthetic curve for Bengaluru (approx 600-1000 MW)
-  // We prefer this over the backend's "Spain" load (28GW) to keep the simulation at city-scale.
-  const baseLoad = 600;
-  const morningPeak = 350 * Math.exp(-Math.pow(localHour - 9.5, 2) / 3);
-  const eveningPeak = 450 * Math.exp(-Math.pow(localHour - 19.5, 2) / 4);
-  const industrialNoise = (Math.sin(localHour * 10) + Math.cos(localHour * 23)) * 15;
-  gridState.totalDemand = Math.round(baseLoad + morningPeak + eveningPeak + industrialNoise);
+  // Calculate current load based on simulation time (for sending to backend)
+  const freshLoad = Math.round(calculateRealisticLoad(localHour));
+
+  // For DISPLAY, use the load that matches the current generation response
+  // This ensures Load = Generation (they're from the same backend request)
+  if (lastBackendRequiredLoad !== null && lastBackendRequiredLoad > 0) {
+    gridState.totalDemand = Math.round(lastBackendRequiredLoad);
+  } else {
+    gridState.totalDemand = freshLoad;
+  }
 
   const loadEl = document.getElementById('mlTotalLoadVal');
   if (loadEl) loadEl.textContent = `${gridState.totalDemand.toLocaleString()} MW`;
 
-  // Update Particles (Visuals)
-  // We want smooth animation, so we use system clock or just a fixed small step
-  // Since this runs every frame, we can use a small constant or calculate dt.
-  updateEnergyParticles(0.05); // Fixed step for smoothness
+  // Update Particles (Visuals) - speed based on total generation
+  updateEnergyParticles(0.05);
 
-  // 2. Calculate Generation per Plant
-  let currentTotalGen = 0;
-  let currentRenewableGen = 0;
-  let currentCarbonEmissions = 0; // kgCO2/h
-
-  const typeTotals = { solar: 0, wind: 0, hydro: 0, nuclear: 0, coal: 0 };
-
-  // First pass: compute raw plant outputs.
-  const plantOutputs = bengaluruPlants.map((plant) => {
-    const maxCap = parseCapacity(plant.capacity);
-    let currentOutput = 0;
-    let emissionFactor = 0; // kgCO2/MWh
-
-    if (plant.type === 'solar') {
-      // Solar: Bell curve from 6am to 6pm (IST)
-      if (localHour > 6 && localHour < 18) {
-        const sunIntensity = Math.max(0, Math.sin(((localHour - 6) / 12) * Math.PI));
-        currentOutput = maxCap * sunIntensity;
-        const cloudCover = Math.sin(localHour * 5) * 0.1 + 0.9;
-        currentOutput *= cloudCover;
-      }
-      emissionFactor = 0;
-    } else if (plant.type === 'wind') {
-      const windBase = 0.4 + 0.3 * Math.sin((localHour - 14) / 24 * Math.PI * 2);
-      const gust = (Math.sin(localHour * 45) * 0.2);
-      currentOutput = maxCap * Math.max(0, windBase + gust);
-      emissionFactor = 0;
-    } else if (plant.type === 'hydro') {
-      const demandFactor = (gridState.totalDemand - 600) / 500;
-      currentOutput = maxCap * (0.4 + Math.max(0, demandFactor * 0.6));
-      emissionFactor = 0;
-    } else if (plant.type === 'nuclear') {
-      currentOutput = maxCap * 0.98;
-      emissionFactor = 12;
-    } else if (plant.type === 'coal') {
-      const demandFactor = (gridState.totalDemand - 600) / 500;
-      currentOutput = maxCap * (0.6 + Math.max(0, demandFactor * 0.4));
-      emissionFactor = 820;
-    }
-
-    // Optimization mode overrides physics.
-    if (window.optimizationTargets && window.optimizationTargets.has(plant.name)) {
-      const target = window.optimizationTargets.get(plant.name);
-      const diff = target - currentOutput;
-      currentOutput += diff * 0.15;
-    }
-
-    currentOutput = Math.max(0, Math.min(currentOutput, maxCap));
-    return { plant, maxCap, output: currentOutput, emissionFactor };
-  });
-
-  // Second pass: aggregate + store per-plant realtime.
-  plantOutputs.forEach(({ plant, maxCap, output, emissionFactor }) => {
-    currentTotalGen += output;
-    currentCarbonEmissions += output * emissionFactor;
-    if (['solar', 'wind', 'hydro', 'nuclear'].includes(plant.type)) {
-      currentRenewableGen += output;
-    }
-    typeTotals[plant.type] += output;
-    plantRealtimeData.set(plant.name, {
-      output: output,
-      maxCapacity: maxCap,
-      status: output > 0.1 ? 'ONLINE' : 'STANDBY',
-      type: plant.type
-    });
-  });
-
-  // 3. Grid Physics & Economics
-
-  // Import/Export Logic: If Demand > Gen, we import dirty power. If Gen > Demand, we export.
-  const netLoad = gridState.totalDemand - currentTotalGen;
-
-  if (netLoad > 0) {
-    // Importing power (usually fossil fuel heavy peaker plants)
-    currentTotalGen += netLoad; // Grid balances by importing
-    currentCarbonEmissions += netLoad * 450; // Gas peaker ~450 kgCO2/MWh
-  }
-
-  // Frequency Simulation with Inertia
-  const balance = (currentTotalGen - gridState.totalDemand); // Should be 0 if balanced perfectly
-  // Add some "error" to simulation to make frequency wobble
-  const controlError = (Math.random() - 0.5) * 5;
-  const targetFreq = 50.0 + (controlError / 1000);
-  // Smooth transition (Inertia)
-  gridState.frequency = gridState.frequency * 0.95 + targetFreq * 0.05;
-
-  // Economics
-  // Price spikes when demand is high or renewables are low
-  const scarcityFactor = Math.max(0, (gridState.totalDemand / 1200)); // 0 to 1+
-  const basePrice = 40; // $/MWh
-  gridState.marketPrice = basePrice + (scarcityFactor * scarcityFactor * 100);
-
-  // Revenue Accumulation (Time step is roughly 1/60th of an hour in real time, but simulation is 3600x speed)
-  // 1 real sec = 1 sim hour. 60fps. 
-  // So each tick is 1/60th of a real second = 1/60th of a sim hour = 1 sim minute.
-  const hoursPerTick = 1 / 60;
-  const revenueTick = (gridState.totalDemand * gridState.marketPrice) * hoursPerTick;
-  gridState.totalRevenue += revenueTick;
-
-  // Metrics
+  // 2. Generation: Entirely from backend
   if (lastBackendBaskets) {
     const total = Object.values(lastBackendBaskets).reduce((a, b) => a + b, 0);
     const clean = (lastBackendBaskets.solar || 0)
@@ -770,35 +726,65 @@ viewer.clock.onTick.addEventListener((clock) => {
       + (lastBackendBaskets.nuclear || 0);
     gridState.totalGen = Math.round(total);
     gridState.renewablePct = Math.round((clean / total) * 100) || 0;
+
+    // Update per-plant realtime data from backend distribution
+    // Split each type's allocation across plants of that type proportionally
+    const cesiumDist = lastBackendDistribution || {};
+    bengaluruPlants.forEach((plant) => {
+      const maxCap = parseCapacity(plant.capacity);
+      const typeAllocation = cesiumDist[plant.type] || 0;
+
+      // Get total capacity for this type
+      const plantsOfType = bengaluruPlants.filter(p => p.type === plant.type);
+      const totalTypeCap = plantsOfType.reduce((sum, p) => sum + parseCapacity(p.capacity), 0);
+
+      // This plant's share
+      const share = totalTypeCap > 0 ? maxCap / totalTypeCap : 0;
+      const plantOutput = typeAllocation * share;
+
+      plantRealtimeData.set(plant.name, {
+        output: plantOutput,
+        maxCapacity: maxCap,
+        status: plantOutput > 0.1 ? 'ONLINE' : 'STANDBY',
+        type: plant.type
+      });
+    });
   } else {
-    gridState.totalGen = Math.round(currentTotalGen);
-    gridState.renewablePct = Math.round((currentRenewableGen / currentTotalGen) * 100) || 0;
+    // Before first backend response, show zeros
+    gridState.totalGen = 0;
+    gridState.renewablePct = 0;
+    bengaluruPlants.forEach((plant) => {
+      const maxCap = parseCapacity(plant.capacity);
+      plantRealtimeData.set(plant.name, {
+        output: 0,
+        maxCapacity: maxCap,
+        status: 'STANDBY',
+        type: plant.type
+      });
+    });
   }
 
-  // 4. Update Dashboard UI
-  // updateDashboard(hour);
+  // 3. Grid metrics (simplified, no physics)
+  gridState.frequency = 50.0 + (Math.random() - 0.5) * 0.02; // Stable ~50Hz
+  const scarcityFactor = Math.max(0, (gridState.totalDemand / 1200));
+  gridState.marketPrice = 40 + (scarcityFactor * scarcityFactor * 100);
 
-  // 5. Update Plant Detail Panel if open
+  // 4. Update Plant Detail Panel if open
   if (selectedPlantName) {
     updatePlantDetailPanel(selectedPlantName);
   }
 
-  // 6. Periodic Optimization (every 10 simulation minutes)
+  // 5. Periodic Backend Fetch (every 10 simulation minutes)
   const currentSimTime = viewer.clock.currentTime.secondsOfDay;
   if (!window.lastOptimizationTime || Math.abs(currentSimTime - window.lastOptimizationTime) > 600) {
     window.lastOptimizationTime = currentSimTime;
     fetchOptimization();
   }
 
-  // Keep the left panel values live and strictly synchronized with the plants.
-  // We use the aggregated 'typeTotals' from the physics loop above.
-  // For 'misc' categories (which have no 3D plants), we use the last backend value.
-  const liveDisplay = { ...typeTotals };
+  // 6. Update UI with backend data
   if (lastBackendBaskets) {
-    liveDisplay.misc_renew = lastBackendBaskets.misc_renew || 0;
-    liveDisplay.misc_nonrenew = lastBackendBaskets.misc_nonrenew || 0;
+    updateMLUI(lastBackendBaskets);
   }
-  updateMLUI(liveDisplay);
 });
 
 // --- ML UI Logic ---
@@ -872,6 +858,15 @@ async function fetchOptimization() {
   try {
     const simulationTimeIso = buildSimulationIso();
     const optimizationType = window.optimizationMode === 'off' ? 'balanced' : window.optimizationMode;
+
+    // Calculate fresh load at request time based on simulation clock
+    const utc = getUtcHourMinute(viewer.clock.currentTime);
+    const localHour = (utc.hourFloat + 5.5) % 24;
+
+    // Use the same realistic load calculation function
+    const freshLoad = calculateRealisticLoad(localHour);
+    const validLoad = Math.round(Math.max(400, freshLoad)); // Minimum 400 MW
+
     const response = await fetch('http://localhost:8000/optimize', {
       method: 'POST',
       headers: {
@@ -880,7 +875,7 @@ async function fetchOptimization() {
       body: JSON.stringify({
         simulation_time: simulationTimeIso,
         optimization_type: optimizationType,
-        current_load: gridState.totalDemand // Send current city demand to scale the backend response
+        current_load: validLoad // Send validated city demand
       }),
     });
 

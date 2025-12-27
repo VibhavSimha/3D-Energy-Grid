@@ -42,6 +42,7 @@ def read_root():
 
 @app.post("/optimize", response_model=OptimizationResponse)
 def optimize_energy(request: OptimizationRequest):
+    print(f"DEBUG: Received optimize request. current_load={request.current_load}, type={request.optimization_type}")
     try:
         # Map UI mode -> weights
         if request.optimization_type == "cost":
